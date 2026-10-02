@@ -1,0 +1,173 @@
+# Builds platform packages on tag push (vX.Y.Z) and publishes a GitHub Release.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - id: ver
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "error: tag '${TAG}' is not a valid semver (expected vX.Y.Z)" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Release version: ${VERSION}"
+
+  build-macos:
+    name: macOS
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: Set workspace version
+        run: ./scripts/ci/set-workspace-version.sh "${{ needs.version.outputs.version }}"
+
+      - name: Package TuneUp.app
+        env:
+          TUNEUP_VERSION: ${{ needs.version.outputs.version }}
+          SKIP_OPEN: "1"
+        run: ./scripts/macos/package-app.sh
+
+      - name: Zip app bundle
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd target/release
+          ditto -c -k --keepParent TuneUp.app "../../tuneup-${VERSION}-macos.zip"
+          ls -lh "../../tuneup-${VERSION}-macos.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: tuneup-${{ needs.version.outputs.version }}-macos.zip
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set workspace version
+        shell: bash
+        run: ./scripts/ci/set-workspace-version.sh "${{ needs.version.outputs.version }}"
+
+      - name: Build release binaries
+        run: cargo build --release -p tuneup -p tuneup-helper
+
+      - name: Zip binaries
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          STAGE="tuneup-${VERSION}-windows-x64"
+          mkdir -p "${STAGE}"
+          cp target/release/tuneup.exe target/release/tuneup-helper.exe "${STAGE}/"
+          7z a -tzip "${STAGE}.zip" "${STAGE}"
+          ls -lh "${STAGE}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: tuneup-${{ needs.version.outputs.version }}-windows-x64.zip
+          if-no-files-found: error
+
+  build-linux:
+    name: Linux
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential pkg-config curl \
+            libdbus-1-dev \
+            libxkbcommon-dev libxcb1-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libwayland-dev libegl1-mesa-dev libgl1-mesa-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: Set workspace version
+        run: ./scripts/ci/set-workspace-version.sh "${{ needs.version.outputs.version }}"
+
+      - name: Build release binaries
+        run: cargo build --release -p tuneup -p tuneup-helper
+
+      - name: Package tarball / deb / rpm
+        env:
+          TUNEUP_VERSION: ${{ needs.version.outputs.version }}
+        run: ./scripts/ci/package-linux.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            tuneup-${{ needs.version.outputs.version }}-linux-x64.tar.gz
+            tuneup_${{ needs.version.outputs.version }}_amd64.deb
+            tuneup-${{ needs.version.outputs.version }}-1.x86_64.rpm
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [version, build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: find dist -type f -ls
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: TuneUp ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/tuneup-${{ needs.version.outputs.version }}-macos.zip
+            dist/tuneup-${{ needs.version.outputs.version }}-windows-x64.zip
+            dist/tuneup-${{ needs.version.outputs.version }}-linux-x64.tar.gz
+            dist/tuneup_${{ needs.version.outputs.version }}_amd64.deb
+            dist/tuneup-${{ needs.version.outputs.version }}-1.x86_64.rpm

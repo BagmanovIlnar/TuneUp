@@ -343,7 +343,7 @@ impl TuneupApp {
     }
 
     fn request_exit(&mut self, context: &egui::Context) {
-        // AVG Sleep Mode: sleeping groups stay asleep across TuneUp restarts.
+        // Sleeping groups stay asleep across TuneUp restarts.
         // Do not restore autostart or clear managed state on exit.
         if self.persist_state() {
             tracing::info!(
