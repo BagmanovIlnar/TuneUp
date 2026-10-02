@@ -50,7 +50,7 @@ mod platform {
 
     pub fn launch(install_root: &Path) -> Result<(), TuneupError> {
         let target = resolve_target(install_root);
-        let wide = to_wide(&target);
+        let wide = to_wide(target.as_os_str());
         let operation = to_wide(OsStr::new("open"));
         // SAFETY: NUL-terminated wide strings; ShellExecuteW does not take ownership.
         let result = unsafe {
