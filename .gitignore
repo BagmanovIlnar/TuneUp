@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+
+# IDE
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / local secrets
+.env
+.env.*
+*.pem

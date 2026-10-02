@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=TuneUp
+Comment=Sleep background apps, clean junk, uninstall leftovers
+Exec=tuneup
+Icon=tuneup
+Terminal=false
+Categories=Utility;System;
+Keywords=tuneup;cleaner;sleep;autostart;
+StartupNotify=false

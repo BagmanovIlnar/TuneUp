@@ -1,0 +1,15 @@
+[package]
+name = "tuneup-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tuneup-core = { path = "../tuneup-core" }
+tuneup-platform = { path = "../tuneup-platform" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.189"
