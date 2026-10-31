@@ -258,8 +258,8 @@ impl UninstallViewState {
         if expand {
             self.expanded.insert(app_id.to_owned());
             self.selected_id = Some(app_id.to_owned());
-            let needs_scan = !self.leftovers_by_app.contains_key(app_id)
-                && !self.scanning.contains(app_id);
+            let needs_scan =
+                !self.leftovers_by_app.contains_key(app_id) && !self.scanning.contains(app_id);
             if needs_scan {
                 self.scanning.insert(app_id.to_owned());
                 self.busy = true;
@@ -402,12 +402,10 @@ impl UninstallViewState {
                                     ui.horizontal(|ui| {
                                         if expand_toggle(ui, expanded, enabled && !self.busy)
                                             .clicked()
-                                        {
-                                            if let Some(next) =
+                                            && let Some(next) =
                                                 self.set_expanded(&app.id, !expanded)
-                                            {
-                                                action = next;
-                                            }
+                                        {
+                                            action = next;
                                         }
 
                                         ui.label(
@@ -603,9 +601,7 @@ impl UninstallViewState {
         if scanning {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(
-                    RichText::new("Ищем связанные файлы в системе…").color(theme.text_muted),
-                );
+                ui.label(RichText::new("Ищем связанные файлы в системе…").color(theme.text_muted));
             });
             return;
         }
@@ -643,11 +639,7 @@ impl UninstallViewState {
             }
         });
 
-        let mut include_user_data = self
-            .include_user_data
-            .get(app_id)
-            .copied()
-            .unwrap_or(false);
+        let mut include_user_data = self.include_user_data.get(app_id).copied().unwrap_or(false);
         if ui
             .checkbox(&mut include_user_data, "Включая профили и настройки")
             .changed()

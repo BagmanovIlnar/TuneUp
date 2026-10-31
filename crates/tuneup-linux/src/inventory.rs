@@ -86,15 +86,11 @@ fn parse_desktop(bytes: &[u8]) -> Result<DesktopData, String> {
                     exec = Some(value.to_owned());
                 }
             }
-            "Hidden" => {
-                if value.eq_ignore_ascii_case("true") {
-                    hidden = true;
-                }
+            "Hidden" if value.eq_ignore_ascii_case("true") => {
+                hidden = true;
             }
-            "NoDisplay" => {
-                if value.eq_ignore_ascii_case("true") {
-                    no_display = true;
-                }
+            "NoDisplay" if value.eq_ignore_ascii_case("true") => {
+                no_display = true;
             }
             _ => {}
         }
@@ -157,7 +153,10 @@ fn is_overly_broad_install_root(path: &Path) -> bool {
         "/var",
         "/var/lib",
     ];
-    if ABSOLUTE.iter().any(|candidate| path == Path::new(candidate)) {
+    if ABSOLUTE
+        .iter()
+        .any(|candidate| path == Path::new(candidate))
+    {
         return true;
     }
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
@@ -731,7 +730,9 @@ mod tests {
 
     #[test]
     fn rejects_broad_local_install_root() {
-        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default();
         if !home.as_os_str().is_empty() {
             assert!(is_overly_broad_install_root(&home.join(".local")));
             assert!(is_overly_broad_install_root(

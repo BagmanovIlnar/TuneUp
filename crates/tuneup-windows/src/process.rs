@@ -123,8 +123,8 @@ mod platform {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, FILETIME, HANDLE},
         System::Threading::{
-            GetProcessTimes, IsProcessCritical, OpenProcess, TerminateProcess,
-            PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+            GetProcessTimes, IsProcessCritical, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_TERMINATE, TerminateProcess,
         },
     };
 

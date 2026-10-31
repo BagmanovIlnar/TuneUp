@@ -78,16 +78,16 @@ mod platform {
             return install_root.to_path_buf();
         }
         let bin = install_root.join("bin");
-        if bin.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&bin) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path
-                        .extension()
-                        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-                    {
-                        return path;
-                    }
+        if bin.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&bin)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                {
+                    return path;
                 }
             }
         }

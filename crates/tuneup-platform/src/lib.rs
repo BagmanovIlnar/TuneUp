@@ -49,7 +49,8 @@ pub trait ProcessControl: Send + Sync {
 
 /// Starts an application from its install root (used by Sleep Mode wake).
 pub trait AppLauncher: Send + Sync {
-    fn launch(&self, install_root: &std::path::Path, display_name: &str) -> Result<(), TuneupError>;
+    fn launch(&self, install_root: &std::path::Path, display_name: &str)
+    -> Result<(), TuneupError>;
 }
 
 pub trait PlatformMutator: Send {
