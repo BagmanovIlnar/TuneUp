@@ -1,37 +1,40 @@
-# TuneUp
+<div align="center">
 
-**TuneUp** — кроссплатформенное настольное приложение на Rust для ускорения
-системы: усыпление фоновых приложений, очистка кэша и
-временных файлов, удаление программ с остатками.
+# 🎛️ TuneUp
 
-Версия workspace: **0.2.0** · Rust **1.98+** · лицензия **MIT**
+**Кроссплатформенный «деактиватор» фоновых приложений для Windows, macOS и Linux**
 
-Приложение работает в **системном трее**. Главное окно открывается кликом по
-иконке или пунктом **«Открыть»**. Закрытие окна скрывает его в трей; полный выход —
-только через **«Выйти»** (при этом восстанавливаются отключённые точки автозапуска
-спящих групп).
+Усыпляйте прожорливые программы, чистите кэш и временные файлы,
+удаляйте приложения вместе с остатками — из одного окна в системном трее.
+
+[![CI](https://github.com/BagmanovIlnar/TuneUp/actions/workflows/ci.yml/badge.svg)](https://github.com/BagmanovIlnar/TuneUp/actions/workflows/ci.yml)
+[![Release](https://github.com/BagmanovIlnar/TuneUp/actions/workflows/release.yml/badge.svg)](https://github.com/BagmanovIlnar/TuneUp/releases)
+![License](https://img.shields.io/badge/license-MIT-blue)
+![Rust](https://img.shields.io/badge/rust-1.98-orange)
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-success)
+
+Версия **0.2.0** · Rust **1.98+** · лицензия **MIT**
+
+</div>
 
 ---
 
-## Оглавление
+## Содержание
 
 1. [Что умеет](#что-умеет)
-2. [Разделы интерфейса](#разделы-интерфейса)
-3. [Режим сна (Sleep Mode)](#режим-сна-sleep-mode)
-4. [Платформы](#платформы)
-5. [Требования](#требования)
-6. [Быстрый старт на Ubuntu](#быстрый-старт-на-ubuntu)
-7. [Установка Rust](#установка-rust)
-8. [Получение исходников](#получение-исходников)
-9. [Релиз через GitHub Actions](#релиз-через-github-actions)
-10. [Сборка](#сборка)
-11. [Запуск](#запуск)
-12. [Тесты и проверка качества](#тесты-и-проверка-качества)
-13. [Структура проекта](#структура-проекта)
-14. [Состояние и журналы](#состояние-и-журналы)
-15. [Безопасность](#безопасность)
-16. [Типичные проблемы](#типичные-проблемы)
-17. [Ограничения](#ограничения)
+2. [Как это выглядит](#как-это-выглядит)
+3. [Архитектура](#архитектура)
+4. [Режим сна (Sleep Mode)](#режим-сна-sleep-mode)
+5. [Привилегированный helper и IPC](#привилегированный-helper-и-ipc)
+6. [Платформы](#платформы)
+7. [Установка](#установка)
+8. [Сборка из исходников](#сборка-из-исходников)
+9. [Разработка и тесты](#разработка-и-тесты)
+10. [Состояние и журналы](#состояние-и-журналы)
+11. [Безопасность](#безопасность)
+12. [Структура проекта](#структура-проекта)
+13. [Типичные проблемы](#типичные-проблемы)
+14. [Ограничения и планы](#ограничения-и-планы)
 
 ---
 
@@ -39,88 +42,197 @@
 
 | Возможность | Описание |
 |---|---|
-| **Сон приложений** | Принудительно завершает процессы группы и отключает автозапуск; пробуждение восстанавливает автозапуск и может сразу запустить приложение |
-| **Группировка** | Связывает процессы, install root (`.app` / каталог установки), точки автозапуска |
-| **Нагрузка** | Оценка по CPU, памяти, числу процессов и автозапусков |
-| **Очистка** | Сканирование и удаление кэша, временных файлов, корзины (с предпросмотром) |
-| **Удаление** | Штатный uninstall ОС + выбор связанных остатков (профили — только явно) |
-| **Настройки** | Автозапуск самого TuneUp при входе в систему (все ОС) |
-| **Состояние** | `state.json`; спящие группы **сохраняются** между запусками TuneUp |
-| **Журналы** | Ежедневные файловые логи, уровень через `TUNEUP_LOG` |
+| 😴 **Сон приложений** | Мягко завершает процессы группы (`SIGTERM` → 2 c → `SIGKILL`) и отключает автозапуск; пробуждение восстанавливает автозапуск и может сразу запустить приложение |
+| 🔗 **Умная группировка** | Связывает процессы, install root (`.app` / каталог установки / `/opt/...`), записи автозапуска, LaunchAgents, systemd units |
+| 📊 **Оценка нагрузки** | Балл по CPU, памяти, числу процессов и точек автозапуска |
+| 🧹 **Очистка** | Скан безопасных кандидатов (кэш, temp, корзина) с предпросмотром и выбором |
+| 🗑️ **Удаление** | Штатный uninstall ОС + выборочные остатки (профили — только явным согласием) |
+| ⚙️ **Автозапуск TuneUp** | Регистрация самого себя на вход в систему (Run-ключ / LaunchAgent / XDG) |
+| 💾 **Персистентность** | Сон переживает перезапуск TuneUp; state с атомарной записью и backup-поколением |
+| 🔔 **Уведомления** | Десктоп-уведомления о переходах сна/пробуждения |
+| 🪟 **Tray-first UX** | Живёт в трее; закрытие окна сворачивает в трей, выход — явно через меню |
 
----
+## Как это выглядит
 
-## Разделы интерфейса
-
-Боковое меню:
+Приложение живёт в **системном трее**. Главное окно открывается кликом по иконке
+или пунктом **«Открыть»**, закрывается обратно в трей. Боковое меню — четыре раздела:
 
 | Раздел | Назначение |
 |---|---|
-| **Сон** | Список приложений, усыпление / пробуждение, фильтры, детали процессов |
-| **Очистка** | Скан безопасных кандидатов → выбор → удаление |
+| **Сон** | Список приложений с фильтрами и поиском, усыпление / пробуждение, детали процессов |
+| **Очистка** | Скан безопасных кандидатов → выбор категорий → удаление |
 | **Удаление** | Установленные программы → остатки → uninstall |
-| **Настройки** | Запуск TuneUp при входе в систему |
+| **Настройки** | Автозапуск TuneUp, полный сброс состояния |
 
-Список процессов обновляется примерно каждые **2 секунды**.
+Список процессов обновляется каждые **2 секунды**; метрики CPU/RAM в интерфейсе —
+каждые 10 секунд или при изменении состава приложений.
+
+---
+
+## Архитектура
+
+### Общая схема
+
+```mermaid
+flowchart TB
+    subgraph GUI["🖥️ apps/tuneup — GUI (egui/eframe)"]
+        UI["Окно + разделы<br/>(Сон · Очистка · Удаление · Настройки)"]
+        TRAY["Системный трей"]
+        POLICY["SleepPolicyEngine<br/>решения Wake/Sleep по снапшотам"]
+    end
+
+    subgraph WORKERS["🧵 Фоновые потоки"]
+        SCANNER["ProcessScanner<br/>процессы — каждые 2 c<br/>инвентарь — каждые 60 c"]
+        TRANS["TransitionWorker<br/>сон / пробуждение<br/>(terminate + disable/restore)"]
+        MAINT["MaintenanceWorker<br/>очистка / удаление программ"]
+        SINGLE["Single-instance listener<br/>TCP :47821 + ACK"]
+    end
+
+    subgraph CORE["📦 crates/tuneup-core"]
+        RESOLVER["GroupResolver<br/>группировка процессов<br/>по install root"]
+        STATE[("StateStore<br/>state.json + state.json.bak<br/>v5, fsync, атомарно")]
+    end
+
+    subgraph PLAT["🔧 Платформенные крейты"]
+        direction LR
+        WIN["tuneup-windows"]
+        MAC["tuneup-macos"]
+        LIN["tuneup-linux"]
+    end
+
+    HELPER["🔐 tuneup-helper<br/>UAC / pkexec / admin prompt"]
+
+    UI <--> TRAY
+    SCANNER --> RESOLVER
+    SCANNER -->|"снапшот групп + процессов"| POLICY
+    POLICY -->|"Wake / Sleep action"| UI
+    UI -->|"команды"| TRANS
+    UI -->|"команды"| MAINT
+    TRANS --> PLAT
+    MAINT --> PLAT
+    SCANNER --> PLAT
+    PLAT --> HELPER
+    UI <--> STATE
+    TRANS -->|"отчёты (backup)"| UI
+```
+
+### Ключевые решения
+
+- **Всё тяжёлое — вне UI-потока.** Сканер, переходы сна и операции очистки/удаления
+  работают в отдельных потоках и общаются с GUI через каналы событий; интерфейс
+  не блокируется даже при ожидании admin-пароля или graceful-завершении процессов.
+- **Сон — это terminate + disable, а не freeze.** Замороженный процесс продолжает
+  держать память; TuneUp завершает процессы (мягко) и убирает точки автозапуска.
+- **State — источник истины.** `PlatformBackup` (данные отката автозапуска)
+  существует только в `state.json`, поэтому запись атомарная, с `fsync`, и
+  предыдущее поколение всегда сохраняется в `.bak`.
+- **Платформа — за трейтами.** `tuneup-platform` описывает возможности
+  (`InventoryProvider`, `ProcessControl`, `PlatformMutator`, `CleanupProvider`,
+  `UninstallProvider`, `SelfAutostartProvider`), GUI о платформе не знает.
 
 ---
 
 ## Режим сна (Sleep Mode)
 
-Не «заморозка» в RAM (`SIGSTOP`), а **завершение процессов** + **отключение
-автозапуска**.
+### Жизненный цикл группы
 
-### Усыпить
+```mermaid
+stateDiagram-v2
+    [*] --> Active : обнаружена при сканировании
 
-1. Раздел **Сон** → приложение → **Усыпить**.
-2. Подтвердите: процессы будут **завершены**, автозапуск — **отключён**.
-3. Опционально: **«Автоматически пробуждать и повторно усыплять»**.
+    Active --> Sleeping : «Усыпить»<br/>terminate + disable autostart
+    Sleeping --> Active : «Разбудить»<br/>restore autostart + launch
 
-TuneUp:
+    Sleeping --> Active : авто (AutoSleepWake):<br/>запущен процесс под install root
+    Active --> Sleeping : авто (AutoSleepWake):<br/>процессы под root исчезли
 
-- расширяет группу (дочерние процессы, каталоги Application Support / AppData /
-  `.config`, общий `jetbrainsd` при безопасных условиях);
-- отклоняет системные / denylist-процессы;
-- завершает процессы **мягко**: сначала `SIGTERM`, затем до 2 секунд на
-  сохранение состояния, после — `SIGKILL` (macOS/Linux); на Windows —
-  `TerminateProcess`;
-- отключает только точно сопоставленные LaunchAgents, Login Items, Run/Startup,
-  tasks, services, XDG, systemd units;
-- сохраняет backup для отката.
+    Active --> Ignored : «Игнорировать»
+    Ignored --> Active : «Вернуть»
 
-Переходы сна/пробуждения выполняются в фоновом потоке — интерфейс не
-блокируется, кнопки на время перехода отключаются.
+    Sleeping --> [*] : авторемонтирование:<br/>install root исчез или сменён<br/>(обновление / удаление приложения)
+```
 
-### Разбудить (кнопка)
+> Группы `Ignored` автоматика не трогает. Сон **переживает перезапуск TuneUp**:
+> при старте TuneUp повторно завершит вернувшиеся процессы спящих групп.
 
-1. Восстанавливает точки автозапуска из backup.
-2. **Запускает** приложение (`open` / `ShellExecute` / `xdg-open`).
+### Последовательность усыпления
 
-### Автоматическая политика (`AutoSleepWake`)
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as Пользователь
+    participant UI as GUI (app.rs)
+    participant S as state.json
+    participant W as TransitionWorker
+    participant OS as Платформа
+
+    U->>UI: «Усыпить» → подтверждение
+    UI->>UI: расширить группу (потомки, Application Support, общий JetBrains-демон)
+    UI->>S: persist intent (rollback-точка)
+    UI--)W: Sleep(group, policy)
+
+    W->>OS: SIGTERM каждому процессу (проверка pid+start_time)
+    loop до 2 секунд
+        W->>W: poll каждые 100 мс
+    end
+    W->>OS: SIGKILL выжившим
+    W->>OS: отключить автозапуск (plist → TuneUpDisabled/, значения реестра → backup)
+    W--)UI: отчёт + PlatformBackup
+
+    UI->>S: persist (backup теперь на диске)
+    UI-->>U: уведомление «деактивировано»
+```
+
+### Пробуждение и автоматика
 
 | Событие | Действие |
 |---|---|
-| Появился процесс **внутри install root** спящей группы | Восстановить автозапуск (**без** повторного launch) + уведомление |
-| Не осталось процессов под install root | Снова усыпить: terminate связанных (включая хелперы вне root) + disable |
-| Группа `Ignored` | Не трогается автоматически |
-| Install root группы исчез/сменён (обновление или удаление приложения) | Авторемонтирование: TuneUp восстанавливает отключённый автозапуск и снимает группу с учёта |
+| Нажатие **«Разбудить»** | Восстановить автозапуск из backup **и запустить** приложение |
+| Появился процесс **внутри install root** спящей группы (Auto) | Восстановить автозапуск без запуска + уведомление |
+| Не осталось процессов под install root (Auto) | Повторно усыпить: завершить связанные (включая хелперы вне root) + отключить |
+| Install root группы исчез/сменён (обновление, удаление приложения) | **Авторемонтирование**: восстановить автозапуск, снять группу с учёта |
+| Выход из TuneUp | Спящие группы остаются усыплёнными; TuneUp дожидается незавершённых переходов |
 
-«Приложение запущено» определяется по путям **под install root** (например
-`RustRover.app`). Общий daemon вроде `jetbrainsd` вне бандла **не** держит
-группу активной, но при усыплении всё равно может быть завершён как связанный.
+«Приложение запущено» определяется по путям **под install root** (например,
+`RustRover.app`). Общий демон вроде `jetbrainsd` вне бандла не держит группу
+активной, но при усыплении завершается как связанный процесс.
 
-### Ручная политика (`Manual`)
+---
 
-Усыпление то же (kill + disable). Пока статус «усыплено», повторный ручной запуск
-приложения **сам** не останавливается и не будит группу — нужен **Разбудить**
-или включённый авто-режим.
+## Привилегированный helper и IPC
 
-### Выход из TuneUp
+Пользовательские операции (XDG, LaunchAgents пользователя, SIGTERM своих
+процессов) выполняются без прав. Системные — через helper по фиксированному
+протоколу:
 
-Пункт трея **Выйти** сохраняет state и завершает процесс. **Спящие приложения
-остаются усыплёнными** (автозапуск по-прежнему отключён), пока вы не нажмёте
-**Разбудить**. При следующем старте TuneUp снова покажет их как Sleeping и при
-необходимости повторно завершит процессы, которые успели запуститься.
+```mermaid
+flowchart LR
+    subgraph USER["Обычные права"]
+        GUI["tuneup (GUI)"]
+        KEY[("helper.session<br/>32-байтный ключ")]
+    end
+
+    subgraph ELEV["Повышенные права"]
+        H["tuneup-helper"]
+    end
+
+    GUI -- "1. spawn: UAC 'runas'<br/>/ pkexec / admin prompt" --> H
+    GUI -- "2. запрос: команда + nonce<br/>HMAC-SHA256(ключ)" --> H
+    H -- "3. проверка: версия, nonce,<br/>подпись, путь клиента" --> H
+    H -- "4. фиксированная операция" --> SYS["HKLM Run · службы · задачи<br/>systemd · /Library/LaunchDaemons<br/>системный temp · msiexec /x"]
+    H -- "5. результат + backup" --> GUI
+    GUI -.-> KEY
+    H -.-> KEY
+```
+
+**Защита:**
+- фиксированный набор команд — произвольного shell и путей нет;
+- каждый запрос подписан HMAC-SHA256 с монотонным nonce (защита от replay);
+- named pipe с DACL (текущий пользователь / SYSTEM / администраторы),
+  проверка образа клиента (`tuneup.exe` в том же каталоге);
+- на Linux — `pkexec` + Polkit policy, payload через stdin без shell;
+- после последнего запроса helper завершается (Windows — до 5 минут idle);
+- ключ хранится только в профиле пользователя, в логи не пишется.
 
 ---
 
@@ -128,574 +240,207 @@ TuneUp:
 
 | | Windows 10/11 | macOS | Linux |
 |---|:---:|:---:|:---:|
-| GUI + трей | Да | Да | Да |
-| Sleep / Wake | Да | Да | Да |
-| Очистка | Да | Да | Да |
+| GUI + трей | Да | Да (menu bar) | Да (SNI/D-Bus) |
+| Сон / Пробуждение | Да | Да | Да |
+| Graceful terminate | `TerminateProcess` | `SIGTERM` → `SIGKILL` | `SIGTERM` → `SIGKILL` |
+| Очистка | Да (+ helper) | Да | Да |
 | Удаление | Win32/MSI/Store* | `.app` / Homebrew Cask | DEB/RPM/Flatpak/Snap |
 | Автозапуск приложений | Run, Startup, Tasks, Services | LaunchAgents/Daemons, Login Items | XDG, systemd |
-| Привилегии | UAC + `tuneup-helper` | Admin dialog | `pkexec` / Polkit |
+| Привилегии | UAC + `tuneup-helper` | admin dialog (osascript) | `pkexec` / Polkit |
 
 \* Store — при наличии штатного идентификатора удаления.
-
-Современные macOS Background Items без публичного API Apple только
-отображаются, не изменяются.
+Современные macOS Background Items без публичного API Apple только отображаются.
 
 ---
 
-## Требования
+## Установка
 
-**Общее:** графическая сессия, Rust **1.98.1**, Cargo, Git (для клона).
+### Готовые пакеты (Release)
 
-### Windows
+Релизы собираются по git-тегу `vX.Y.Z` и публикуются в
+[GitHub Releases](https://github.com/BagmanovIlnar/TuneUp/releases):
 
-- Windows 10/11 x64
-- Visual Studio 2022 Build Tools + **Desktop development with C++**
-- Windows SDK
-- target `x86_64-pc-windows-msvc`
-- для release helper нужен Windows-хост (`rc.exe` встраивает UAC manifest)
-
-### macOS
-
-```bash
-xcode-select --install
-```
-
-Для Login Items может понадобиться разрешение **System Events**
-(System Settings → Privacy & Security → Automation).
-
-### Linux (пример Ubuntu/Debian)
-
-Нужна **графическая сессия** (X11 или Wayland). Пакеты:
-
-```bash
-sudo apt update
-sudo apt install -y \
-  build-essential pkg-config \
-  polkitd pkexec systemd
-```
-
-| Пакет | Зачем |
+| Артефакт | Платформа |
 |---|---|
-| `build-essential`, `pkg-config` | компилятор C / систем tools |
-| `polkitd`, `pkexec` | привилегии для `tuneup-helper` |
-
-Трей на Linux идёт через **StatusNotifierItem** (`tray-icon` feature `ksni`, D-Bus) —
-отдельные `libgtk-3-dev` / `libayatana-appindicator3-dev` **не нужны**.
-На рабочем столе должен быть SNI-хост (GNOME с расширением AppIndicator/SNI,
-KDE, Cosmic и т.п.).
-
-На **Ubuntu 24.04 и новее** пакет `policykit-1` убран — ставьте `polkitd pkexec`.
-На старых Ubuntu/Debian вместо них ещё встречается metapackage `policykit-1`.
-
----
-
-## Быстрый старт на Ubuntu
-
-Полный путь «с нуля» до работающего приложения (Ubuntu 22.04–26.04, x86_64).
-
-### 1. Системные зависимости
+| `tuneup-X.Y.Z-macos.zip` | macOS — `TuneUp.app` |
+| `tuneup-X.Y.Z-windows-x64.zip` | Windows — `tuneup.exe` + `tuneup-helper.exe` |
+| `tuneup-X.Y.Z-linux-x64.tar.gz` | Linux — бинарники |
+| `tuneup_X.Y.Z_amd64.deb` / `tuneup-X.Y.Z-1.x86_64.rpm` | Linux — пакеты (включая Polkit policy) |
 
 ```bash
-sudo apt update
-sudo apt install -y \
-  build-essential pkg-config curl git \
-  polkitd pkexec systemd
-```
-
-Если `apt` пишет `Could not get lock .../lists/lock` — подождите окончания другого
-`apt`/`unattended-upgrades` и повторите (не удаляйте lock-файл вручную).
-
-### 2. Rust 1.98.1
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-rustup toolchain install 1.98.1
-```
-
-### 3. Исходники и toolchain проекта
-
-```bash
-git clone <repository-url> tuneup
-cd tuneup
-rustup override set 1.98.1
-rustc --version   # ожидается rustc 1.98.1 ...
-```
-
-### 4. Сборка и запуск
-
-```bash
-# debug (разработка)
-cargo build -p tuneup -p tuneup-helper
-cargo run -p tuneup
-
-# или release
-cargo build --release -p tuneup -p tuneup-helper
-./target/release/tuneup
-```
-
-После старта окно **скрыто**: откройте его кликом по иконке в трее (или пунктом
-**«Открыть»**). `tuneup-helper` вручную не запускайте — GUI вызовет его через
-`pkexec`, когда понадобятся права.
-
-Подробные логи:
-
-```bash
-TUNEUP_LOG=debug cargo run -p tuneup
-```
-
-Логи и state на Linux: `~/.local/state/TuneUp/` (или `$XDG_STATE_HOME/TuneUp/`).
-
----
-
-## Установка Rust
-
-```bash
-# https://rustup.rs/
-rustup toolchain install 1.98.1
-cd /path/to/tuneup
-rustup override set 1.98.1
-rustc --version   # rustc 1.98.1 (48a229cea 2026-09-01)
-cargo --version
-```
-
----
-
-## Получение исходников
-
-```bash
-git clone <repository-url> tuneup
-cd tuneup
-rustup override set 1.98.1
-```
-
-Или уже локально:
-
-```bash
-cd /path/to/tuneup
-```
-
----
-
-## Релиз через GitHub Actions
-
-Версия релиза берётся из **git-тега** `vX.Y.Z` (например `v1.0.0` → version `1.0.0`).
-
-1. Убедитесь, что изменения запушены в GitHub.
-2. Создайте и отправьте тег:
-
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
-
-3. Workflow **Release** (`.github/workflows/release.yml`):
-   - выставит `[workspace.package].version` в `Cargo.toml` на CI;
-   - соберёт артефакты:
-     - macOS: `tuneup-1.0.0-macos.zip` (`TuneUp.app`)
-     - Windows: `tuneup-1.0.0-windows-x64.zip` (`tuneup.exe` + `tuneup-helper.exe`)
-     - Linux: `tuneup-1.0.0-linux-x64.tar.gz`, **`tuneup_1.0.0_amd64.deb`**, **`tuneup-1.0.0-1.x86_64.rpm`**
-       (в пакеты входят `/usr/bin/tuneup`, `/usr/libexec/tuneup-helper`, Polkit policy)
-   - опубликует GitHub Release с этими файлами.
-
-Локально версию в репозитории можно не менять заранее — для CI достаточно тега.
-Для локальной сборки `.app` с нужной версией:
-
-```bash
-./scripts/ci/set-workspace-version.sh 1.0.0
-./scripts/macos/package-app.sh
-```
-
-Локально Linux `.deb` / `.rpm` (нужен `curl`, x86_64 Linux):
-
-```bash
-./scripts/ci/set-workspace-version.sh 1.0.0
-cargo build --release -p tuneup -p tuneup-helper
-TUNEUP_VERSION=1.0.0 ./scripts/ci/package-linux.sh
-# → tuneup-1.0.0-linux-x64.tar.gz
-# → tuneup_1.0.0_amd64.deb
-# → tuneup-1.0.0-1.x86_64.rpm
-```
-
-Установка:
-
-```bash
+# Linux (.deb)
 sudo dpkg -i tuneup_1.0.0_amd64.deb
-# или
+# Linux (.rpm)
 sudo rpm -Uvh tuneup-1.0.0-1.x86_64.rpm
 ```
 
-Workflow **CI** (`.github/workflows/ci.yml`) на push/PR:
+> **Windows:** держите `tuneup-helper.exe` в одном каталоге с `tuneup.exe`.
 
-- **linux**: `fmt`, `test`, `clippy`;
-- **windows-cross**: `check` + `clippy` по таргету `x86_64-pc-windows-msvc`
-  (компилируется весь `#[cfg(windows)]` код — named pipes, реестр, службы);
-- **macos**: нативные `fmt` / `test` / `clippy`.
-
----
-
-## Сборка
-
-Все команды — из **корня workspace**.
-
-### Релизная сборка (основная)
-
-**macOS / Linux (бинарник):**
+### Быстрый старт на Ubuntu (из исходников)
 
 ```bash
-cargo build --release -p tuneup
+sudo apt update
+sudo apt install -y build-essential pkg-config curl git polkitd pkexec systemd
+
+curl -proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup toolchain install 1.98.1
+
+git clone git@github.com:BagmanovIlnar/TuneUp.git tuneup
+cd tuneup
+rustup override set 1.98.1
+
+cargo build -p tuneup -p tuneup-helper
+cargo run -p tuneup
 ```
 
-Бинарник: `target/release/tuneup`
+После старта окно **скрыто** — откройте его кликом по иконке в трее.
+Хелпер вручную не запускайте: GUI поднимет его через `pkexec` при необходимости.
 
-Запуск из терминала:
+Требования к десктопу: X11 или Wayland **с SNI-хостом** (GNOME + расширение
+AppIndicator, KDE, Cosmic); на Wayland окно работает через XWayland (`DISPLAY`).
 
-```bash
-./target/release/tuneup
-```
-
-**macOS — пакет `.app` (рекомендуется, без окна Terminal):**
+## Сборка из исходников
 
 ```bash
+# Debug / Release
+cargo build -p tuneup            # + -p tuneup-helper на Windows/Linux
+
+# macOS: пакет .app без окна Terminal
 ./scripts/macos/package-app.sh
-```
 
-Скрипт соберёт release и создаст `target/release/TuneUp.app`, затем запустит его.
-Иконка появляется **только в строке меню** (трей); главное окно — по клику на иконку.
+# Linux: .deb / .rpm / tar.gz (локально)
+TUNEUP_VERSION=1.0.0 ./scripts/ci/package-linux.sh
 
-Повторный запуск:
-
-```bash
-open target/release/TuneUp.app
-```
-
-**Windows** (GUI + helper в одном каталоге):
-
-```powershell
-cargo build --release -p tuneup -p tuneup-helper
-```
-
-Бинарники: `target\release\tuneup.exe`, `target\release\tuneup-helper.exe`
-
-```powershell
-.\target\release\tuneup.exe
-```
-
-### Быстрая проверка типов
-
-```bash
-cargo check --workspace
-```
-
-Только GUI:
-
-```bash
-cargo check -p tuneup
-```
-
-### Debug
-
-```bash
-cargo build --workspace
-# или только приложение:
-cargo build -p tuneup
-```
-
-Артефакты:
-
-| ОС | Путь |
-|---|---|
-| macOS / Linux | `target/debug/tuneup` |
-| Windows | `target\debug\tuneup.exe`, `target\debug\tuneup-helper.exe` |
-
-### Release (подробно)
-
-**macOS** (helper не нужен):
-
-```bash
-cargo build --release -p tuneup
-# → target/release/tuneup
-
-# Рекомендуемый GUI-пакет без Terminal:
-./scripts/macos/package-app.sh
-# → target/release/TuneUp.app
-```
-
-**Linux** (пользовательские операции — без helper; system — через helper + pkexec):
-
-```bash
-cargo build --release -p tuneup
-# при необходимости также:
-cargo build --release -p tuneup-helper
-```
-
-**Windows** (helper рядом с GUI обязателен):
-
-```powershell
-cargo build --release -p tuneup -p tuneup-helper
-# → target\release\tuneup.exe
-# → target\release\tuneup-helper.exe
-```
-
-`tuneup-helper.exe` должен лежать **в том же каталоге**, что и `tuneup.exe`.
-
-### Очистка артефактов
-
-```bash
-cargo clean
-```
-
-### Cross-check Windows с macOS/Linux (типы, не готовый exe)
-
-```bash
+# Кросс-проверка типов под Windows (с любой ОС)
 rustup target add x86_64-pc-windows-msvc
 cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 ```
 
-Полноценный Windows-бинарник и UAC-manifest helper — только на Windows-хосте.
+Полноценный Windows-бинарник и UAC-манифест хелпера — только на Windows-хосте
+(нужен `rc.exe` из VS Build Tools).
 
----
+Подробные логи: `TUNEUP_LOG=debug cargo run -p tuneup`.
 
-## Запуск
-
-### Рекомендуемый способ разработки
-
-```bash
-cargo run -p tuneup
-```
-
-Release без переустановки:
+## Разработка и тесты
 
 ```bash
-cargo run --release -p tuneup
-```
-
-### Готовый бинарник
-
-```bash
-# Debug
-./target/debug/tuneup
-
-# Release
-./target/release/tuneup
-```
-
-Windows PowerShell:
-
-```powershell
-.\target\debug\tuneup.exe
-.\target\release\tuneup.exe
-```
-
-После старта окно **скрыто**: работают процесс и иконка в трее / строке меню.
-Откройте окно кликом по иконке или пунктом **«Открыть»**. Если создать трей не
-удалось, приложение само покажет главное окно.
-
-Повторный запуск не создаёт второй процесс: уже работающий экземпляр получает
-команду показать окно, а новый процесс сразу завершается.
-
-Helper **не** запускайте вручную: на Windows он поднимается через UAC при
-нужде; на Linux — через `pkexec`.
-
-### Подробные логи при запуске
-
-```bash
-TUNEUP_LOG=debug cargo run -p tuneup
-```
-
-```powershell
-$env:TUNEUP_LOG = "debug"
-cargo run -p tuneup
-```
-
----
-
-## Использование (кратко)
-
-### Сон
-
-См. [Режим сна](#режим-сна-sleep-mode).
-
-### Очистка
-
-1. **Очистка** → **Сканировать**
-2. Проверьте категории (системные пути по умолчанию сняты)
-3. **Очистить выбранное**
-
-### Удаление
-
-1. **Удаление** → выберите программу → остатки
-2. При необходимости **Удалить профили и настройки**
-3. Подтвердите: сначала штатный uninstall ОС, затем отмеченные пути
-
-### Настройки
-
-Включите **запуск при входе**, если TuneUp должен стартовать вместе с сессией.
-
----
-
-## Тесты и проверка качества
-
-```bash
-# Форматирование
-cargo fmt --all --check
-
-# Unit-тесты всего workspace
-cargo test --workspace
-
-# Только ядро
-cargo test -p tuneup-core
-
-# Clippy (строго)
+cargo fmt --all --check                 # форматирование
+cargo test --workspace                  # unit-тесты (84+)
 cargo clippy --workspace --all-targets -- -D warnings
-
-# Полный локальный цикл
-cargo fmt --all --check \
-  && cargo test --workspace \
-  && cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-### Integration-тесты Windows (`#[ignore]`)
+CI (push/PR) проверяет **три платформы**:
 
-Только в изолированной VM — меняют реестр / Startup / tasks / services:
-
-```powershell
-cargo test -p tuneup-windows `
-  --test windows_integration `
-  -- --ignored --nocapture
+```mermaid
+flowchart LR
+    PUSH["push / PR"] --> L["ubuntu: fmt + test + clippy"]
+    PUSH --> W["ubuntu: check + clippy<br/>таргет x86_64-pc-windows-msvc<br/>(весь cfg-windows код)"]
+    PUSH --> M["macos: fmt + test + clippy<br/>(нативно)"]
 ```
 
-Опционально:
-
-```powershell
-$env:TUNEUP_TEST_TASK = "\TuneUp\TestTask"
-$env:TUNEUP_TEST_SERVICE = "TuneUpTestService"
-$env:TUNEUP_TEST_SERVICE_START = "3"
-```
-
-### Integration macOS (часть `#[ignore]`)
+Интеграционные тесты платформ меняют реальную систему (реестр, LaunchAgents,
+systemd) и помечены `#[ignore]` — запускать только в изолированной VM:
 
 ```bash
-cargo test -p tuneup-macos -- --ignored --nocapture
+cargo test -p tuneup-macos  -- --ignored --nocapture
+cargo test -p tuneup-linux  -- --ignored --nocapture
+# Windows (PowerShell):
+cargo test -p tuneup-windows --test windows_integration -- --ignored --nocapture
 ```
 
----
-
-## Структура проекта
-
-```text
-tuneup/
-├── apps/
-│   ├── tuneup/           # GUI (eframe/egui), трей, scanner, Sleep/Cleanup/Uninstall
-│   └── tuneup-helper/    # привилегированный helper (Windows / Linux pkexec)
-├── crates/
-│   ├── tuneup-core/      # модели, grouping, policy, state, IPC
-│   ├── tuneup-platform/  # traits: ProcessControl, AppLauncher, PlatformMutator, …
-│   ├── tuneup-windows/   # inventory, terminate, ShellExecute, registry/tasks
-│   ├── tuneup-macos/     # .app, launchd, SIGKILL, open
-│   └── tuneup-linux/     # пакеты, XDG, systemd, SIGKILL, xdg-open
-├── Cargo.toml
-└── README.md
-```
-
-| Крейт | Роль |
-|---|---|
-| `tuneup-core` | Группы, `SleepPolicyEngine`, `StateStore` (version 5), ошибки |
-| `tuneup-platform` | `ProcessControl::terminate`, `AppLauncher`, mutators, cleanup/uninstall traits |
-| `tuneup-windows` / `-macos` / `-linux` | Платформенные реализации |
-| `tuneup` | Оркестрация UI и deactivator |
-| `tuneup-helper` | Elevated операции по фиксированному IPC |
+Релиз: тег `vX.Y.Z` → workflow Release соберёт все артефакты и опубликует
+GitHub Release.
 
 ---
 
 ## Состояние и журналы
 
-Формат state: JSON, текущая версия **5** (Sleep = terminate, не freeze).
+| ОС | State | Логи |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\TuneUp\state.json` (+ `.bak`) | `%LOCALAPPDATA%\TuneUp\logs\tuneup.log.YYYY-MM-DD` |
+| macOS | `~/Library/Application Support/TuneUp/state.json` (+ `.bak`) | `~/Library/Logs/TuneUp/logs/...` |
+| Linux | `$XDG_STATE_HOME/TuneUp/state.json` (+ `.bak`) | `$XDG_STATE_HOME/TuneUp/logs/...`, `/var/log/TuneUp/helper.log.*` |
 
-### Windows
-
-```text
-%LOCALAPPDATA%\TuneUp\state.json
-%LOCALAPPDATA%\TuneUp\helper.session
-%LOCALAPPDATA%\TuneUp\logs\tuneup.log.YYYY-MM-DD
-%LOCALAPPDATA%\TuneUp\logs\helper.log.YYYY-MM-DD
-```
-
-### macOS
-
-```text
-~/Library/Application Support/TuneUp/state.json
-~/Library/Logs/TuneUp/logs/tuneup.log.YYYY-MM-DD
-```
-
-### Linux
-
-```text
-$XDG_STATE_HOME/TuneUp/state.json          # или ~/.local/state/TuneUp/
-$XDG_STATE_HOME/TuneUp/logs/...            # или ~/TuneUp/logs/
-/var/log/TuneUp/helper.log.YYYY-MM-DD      # system helper
-```
-
-При повреждении основного файла загружается `state.json.bak` — предыдущее
-поколение (оно обновляется при каждой успешной записи; сама запись
-атомарная, с fsync). Перед ручным удалением state завершите TuneUp через трей.
-
-IPC-ключ Windows в `state.json` не хранится — только в `helper.session`.
-
----
+- Формат state: JSON, версия **5**; миграции со v1/v2+; при повреждении
+  основного файла загружается `.bak` (предыдущее поколение, обновляется при
+  каждой успешной записи).
+- Запись атомарная (tmp → rename) с `fsync` файла и каталога.
+- Перед ручным удалением state завершите TuneUp через трей.
 
 ## Безопасность
 
-- GUI без повышенных прав.
-- UAC / admin dialog / Polkit — только для системных объектов.
-- Denylist критических процессов (launchd, csrss, explorer, …).
-- Перед kill — проверка `(pid, start_time)` против reuse PID.
-- Отключение автозапуска только при точном совпадении с install root.
-- Startup-файлы переносятся в `TuneUpDisabled`, не удаляются навсегда.
-- Helper: фиксированные команды, HMAC IPC, без произвольного shell; после
-  последнего запроса helper Windows живёт с правами администратора не дольше
-  5 минут, затем завершается.
-- Завершение процессов — мягкое: `SIGTERM` → 2 c grace → `SIGKILL`
-  (macOS/Linux); на Windows — `TerminateProcess`.
+- GUI работает **без** повышенных прав; UAC / admin dialog / Polkit — только
+  для системных объектов, по требованию.
+- Denylist критических процессов (`launchd`, `windowserver`, `systemd`,
+  `explorer`, …) + защита системных путей исполняемых файлов.
+- Перед каждым сигналом сверяется `(pid, start_time)` — реюз PID не убьёт
+  чужой процесс.
+- Отключение автозапуска только при **точном** совпадении цели с install root;
+  startup-файлы переносятся в `TuneUpDisabled/`, а не удаляются.
+- Завершение процессов мягкое: `SIGTERM` → 2 c → `SIGKILL` (macOS/Linux).
+- Cleanup/uninstall удаляют только пути, повторно валидируемые по allowlist
+  и protected-roots; профили и настройки — только с явного согласия.
 
-**Не усыпляйте** системную оболочку, антивирус, драйверы и критичные сервисы.
+> **Не усыпляйте** системную оболочку, антивирус, драйверы и критичные сервисы.
 
----
+## Структура проекта
+
+```
+tuneup/
+├── apps/
+│   ├── tuneup/                  # GUI: egui, трей, scanner, transitions, maintenance
+│   │   └── src/
+│   │       ├── app.rs           # состояние UI, политика, обработка событий
+│   │       ├── scanner.rs       # фоновый сканер процессов и инвентаря
+│   │       ├── transition_worker.rs  # сон/пробуждение вне UI-потока
+│   │       ├── maintenance_worker.rs # очистка/удаление вне UI-потока
+│   │       ├── deactivator.rs   # DeactivationManager: terminate + disable/restore
+│   │       ├── single_instance.rs    # TCP :47821 + ACK-протокол
+│   │       └── views/           # cleanup / uninstall / settings
+│   └── tuneup-helper/           # привилегированный helper (Windows, Linux)
+├── crates/
+│   ├── tuneup-core/             # модели, grouping, policy, state v5, IPC-протокол
+│   ├── tuneup-platform/         # трейты платформенных возможностей
+│   ├── tuneup-windows/          # реестр, задачи, службы, named pipe, TerminateProcess
+│   ├── tuneup-macos/            # .app, launchd, Login Items, нативный plist, open
+│   └── tuneup-linux/            # пакеты, XDG, systemd, /proc-identity
+├── packaging/                   # .desktop, Polkit policy, nfpm-шаблон
+├── scripts/                     # packaging, версия workspace
+└── .github/workflows/           # CI (3 платформы), Release по тегам
+```
 
 ## Типичные проблемы
 
 | Симптом | Что делать |
 |---|---|
-| Нет окна после запуска | Откройте иконку в трее / menu bar |
-| После сна остаётся «Running in Background» / daemon | Убедитесь, что сборка свежая; при Auto после закрытия IDE группа должна усыпиться повторно и добить хелперы |
-| Повторный запуск без уведомления (Manual) | Без галочки авто группа не будится сама — нажмите **Разбудить** или включите авто |
-| Приложение «зависло» в состоянии Sleeping после обновления/удаления | TuneUp авторемонтирует такие группы при старте (восстановит автозапуск); иначе нажмите **Сбросить всё** в настройках |
-| Порт 47821 занят другим приложением | TuneUp запустится без защиты от двойного запуска (предупреждение в логе) |
+| Нет окна после запуска | Так задумано: откройте иконку в трее / «Открыть» |
+| Нет иконки в трее (GNOME) | Нужен SNI-хост — расширение «AppIndicator and KStatusNotifierItem» |
+| Окно не прячется в трей (Wayland) | Нужен `DISPLAY` (XWayland) — приложение само форсит X11; проверьте `echo $DISPLAY` |
+| После сна остался «Running in Background» | Включите авто-режим: после закрытия IDE группа усыпится повторно и добьёт хелперы |
+| Повторный запуск не будит группу | Без галочки «авто» ручной запуск не отслеживается — нажмите **Разбудить** |
+| Группа «залипла» в Sleeping после обновления приложения | При следующем старте TuneUp авторемонтирует её (восстановит автозапуск); или «Сбросить всё» |
 | Helper не найден (Windows) | Положите `tuneup-helper.exe` рядом с `tuneup.exe` |
 | Manifest helper без UAC | Собирайте helper на Windows-хосте |
-| `Package gio-2.0 was not found` | Устаревшая подсказка для GTK-трея; текущая сборка использует `ksni` и GTK не требует |
-| `policykit-1 has no installation candidate` | Ставьте `polkitd pkexec` (Ubuntu 24.04+) |
+| Порт 47821 занят другим приложением | TuneUp запустится без защиты от двойного запуска (warning в логе) |
+| `policykit-1 has no installation candidate` | Ubuntu 24.04+: ставьте `polkitd pkexec` |
 | `Could not get lock ... apt` | Дождитесь другого `apt`; lock не удалять |
-| `winit`: platform not supported (Linux) | В `apps/tuneup` для Linux уже включены фичи `x11`/`wayland` у `winit`; обновите код и пересоберите |
-| `Glutin ... native window is not supported` | Нужны фичи `wayland`/`x11`/`glx` у `glutin` (уже в `apps/tuneup` для Linux); пересоберите |
-| `GTK has not been initialized` / AppIndicator CRITICAL | Старый GTK-бэкенд трея; нужна сборка с `tray-icon` feature `ksni` (уже в репо) |
-| Окно сразу видно / не закрывается в трей (Linux Wayland) | Нужен `DISPLAY` (XWayland): приложение само форсит X11. Проверьте `echo $DISPLAY` |
-| Нет иконки в трее (GNOME) | Нужен SNI/AppIndicator host в DE (расширение «AppIndicator and KStatusNotifierItem») |
-| Запрос пароля админа | Нормально (`pkexec`); отмена → rollback |
+| Запрос пароля админа | Нормально (`pkexec` / UAC / osascript); отмена → откат операции |
 | Нужен разбор бага | `TUNEUP_LOG=debug` и смотрите лог за день |
 
----
+## Ограничения и планы
 
-## Ограничения
+**Сейчас:**
+- Политика сна — опрос каждые 2 c (реакция не мгновенная).
+- Windows-terminate без graceful-фазы (`WM_CLOSE` не реализован).
+- macOS Background Items (SMAppService) — только отображение.
+- Installer, notarization и auto-update отсутствуют.
 
-- Готовых installer / notarization / auto-update пока нет.
-- Privileged Windows/Linux сценарии лучше проверять в VM.
-- macOS Background Items ограничены публичными API Apple.
-- Полнота «всех следов» при uninstall не гарантируется — удаляются только
-  обнаруженные и подтверждённые пути.
+**В планах:** событийный мониторинг процессов, graceful-завершение на Windows,
+инсталляторы, автообновление.
 
 ---
 
 ## Лицензия
 
-MIT (см. `license` в workspace `Cargo.toml`).
+MIT — см. [LICENSE](LICENSE).
