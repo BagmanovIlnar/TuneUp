@@ -12,33 +12,32 @@ mod path_util;
 
 use std::sync::Arc;
 
-use tuneup_core::state::PersistedState;
 use tuneup_platform::{PlatformCapabilities, PlatformServices};
 
-pub fn services(state: &mut PersistedState) -> (PlatformServices, Option<String>) {
-    let (helper, helper_status, error) =
-        match ipc::load_or_create_session_key(state.ipc_session_key) {
-            Ok(key) => {
-                state.ipc_session_key = Some(key);
-                match ipc::ElevatedClient::new(key) {
-                    Ok(client) => (
-                        Some(client),
-                        "Windows helper готов, UAC по запросу".to_owned(),
-                        None,
-                    ),
-                    Err(error) => (
-                        None,
-                        "Windows helper недоступен".to_owned(),
-                        Some(error.to_string()),
-                    ),
-                }
-            }
+/// Builds Windows platform services.
+///
+/// The IPC session key lives only in `%LOCALAPPDATA%\TuneUp\helper.session`
+/// (never inside `state.json`), shared with the elevated helper.
+pub fn services() -> (PlatformServices, Option<String>) {
+    let (helper, helper_status, error) = match ipc::load_or_create_session_key() {
+        Ok(key) => match ipc::ElevatedClient::new(key) {
+            Ok(client) => (
+                Some(client),
+                "Windows helper готов, UAC по запросу".to_owned(),
+                None,
+            ),
             Err(error) => (
                 None,
                 "Windows helper недоступен".to_owned(),
                 Some(error.to_string()),
             ),
-        };
+        },
+        Err(error) => (
+            None,
+            "Windows helper недоступен".to_owned(),
+            Some(error.to_string()),
+        ),
+    };
     (
         PlatformServices {
             inventory: Arc::new(inventory::InventoryAggregator),

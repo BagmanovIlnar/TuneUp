@@ -138,7 +138,7 @@ impl TuneupApp {
             Err(error) => (None, PersistedState::default(), Some(error.to_string())),
         };
 
-        let (services, helper_error) = platform_runtime::create(&mut state);
+        let (services, helper_error) = platform_runtime::create();
         let PlatformServices {
             inventory,
             process_control,
@@ -150,9 +150,6 @@ impl TuneupApp {
             capabilities,
             helper_status,
         } = services;
-        if let Some(store) = &store {
-            let _ = store.save_atomic(&state);
-        }
         let action_message = state_error.or(helper_error).map(|message| (false, message));
         let policy = SleepPolicyEngine::new(state.managed_groups.clone());
         let maintenance = MaintenanceWorker::start(context, cleanup, uninstaller);

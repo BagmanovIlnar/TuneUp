@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -20,7 +21,6 @@ pub const STATE_VERSION: u32 = 5;
 pub struct PersistedState {
     pub version: u32,
     pub managed_groups: HashMap<String, ManagedGroupState>,
-    pub ipc_session_key: Option<[u8; 32]>,
     /// Preferred UI value for launching TuneUp at login (OS registration is authoritative).
     #[serde(default)]
     pub start_at_login: bool,
@@ -31,7 +31,6 @@ impl Default for PersistedState {
         Self {
             version: STATE_VERSION,
             managed_groups: HashMap::new(),
-            ipc_session_key: None,
             start_at_login: false,
         }
     }
@@ -74,6 +73,13 @@ impl StateStore {
         Err(first_error.unwrap_or(StateError::DirectoryUnavailable))
     }
 
+    /// Persists the state atomically.
+    ///
+    /// The file is fsynced before rename so a crash never leaves a truncated
+    /// `state.json`, and the previous generation is kept as `state.json.bak`
+    /// for recovery (see [`StateStore::load`]). `PlatformBackup` data lives
+    /// only here, so durability matters: without it a sleeping group's
+    /// autostart entries could stay disabled forever with no way back.
     pub fn save_atomic(&self, state: &PersistedState) -> Result<(), StateError> {
         let parent = self.path.parent().ok_or(StateError::DirectoryUnavailable)?;
         fs::create_dir_all(parent).map_err(|error| StateError::Io(error.to_string()))?;
@@ -81,7 +87,12 @@ impl StateStore {
         let backup = self.path.with_extension("json.bak");
         let bytes = serde_json::to_vec_pretty(state)
             .map_err(|error| StateError::Corrupt(error.to_string()))?;
-        fs::write(&temporary, bytes).map_err(|error| StateError::Io(error.to_string()))?;
+        let mut file =
+            fs::File::create(&temporary).map_err(|error| StateError::Io(error.to_string()))?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| StateError::Io(error.to_string()))?;
+        drop(file);
         if backup.exists() {
             fs::remove_file(&backup).map_err(|error| StateError::Io(error.to_string()))?;
         }
@@ -94,12 +105,21 @@ impl StateStore {
             }
             return Err(StateError::Io(error.to_string()));
         }
-        if backup.exists() {
-            fs::remove_file(backup).map_err(|error| StateError::Io(error.to_string()))?;
-        }
+        sync_directory(parent);
         Ok(())
     }
 }
+
+/// Best-effort directory fsync so rename ordering survives power loss.
+#[cfg(unix)]
+fn sync_directory(parent: &Path) {
+    if let Ok(directory) = fs::File::open(parent) {
+        let _ = directory.sync_all();
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_parent: &Path) {}
 
 fn load_file(path: &Path) -> Result<PersistedState, StateError> {
     let bytes = fs::read(path).map_err(|error| StateError::Io(error.to_string()))?;
@@ -211,7 +231,6 @@ fn migrate_v1(value: serde_json::Value) -> Result<PersistedState, StateError> {
     Ok(PersistedState {
         version: STATE_VERSION,
         managed_groups,
-        ipc_session_key: None,
         start_at_login: false,
     })
 }
@@ -231,7 +250,12 @@ mod tests {
         let state = PersistedState::default();
         store.save_atomic(&state).unwrap();
         assert_eq!(store.load().unwrap().version, STATE_VERSION);
-        let _ = fs::remove_file(path);
+        // The previous generation is kept for recovery from the second save on.
+        store.save_atomic(&state).unwrap();
+        assert!(path.with_extension("json.bak").exists());
+        assert!(path.exists());
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(path.with_extension("json.bak"));
     }
 
     #[test]

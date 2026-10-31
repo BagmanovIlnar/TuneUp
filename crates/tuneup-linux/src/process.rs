@@ -7,12 +7,14 @@ use tuneup_core::{
     model::{ProcessIdentity, ProcessInfo},
 };
 
-/// Force-terminates Linux processes with `SIGKILL`.
+/// Terminates Linux processes with PID reuse protection: `SIGTERM` first,
+/// a short grace period, then `SIGKILL` for survivors.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LinuxProcessControl;
 
 impl LinuxProcessControl {
-    /// Validates every process, then force-kills them. Already-exited PIDs succeed.
+    /// Validates every process, then terminates them gracefully
+    /// (`SIGTERM` → grace → `SIGKILL`). Already-exited PIDs succeed.
     ///
     /// # Example
     ///
@@ -157,30 +159,28 @@ mod imp {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use std::{fs, io};
+    use std::{
+        fs, io, thread,
+        time::{Duration, Instant},
+    };
 
     use super::*;
+
+    /// How long a SIGTERM'd process gets to exit cleanly before SIGKILL.
+    const GRACE: Duration = Duration::from_secs(2);
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
     pub fn terminate(
         processes: &[ProcessInfo],
     ) -> Result<(), (Vec<ProcessIdentity>, Vec<TuneupError>)> {
-        let mut remaining = Vec::new();
-        let mut errors = Vec::new();
-        for process in processes {
-            let identity = ProcessIdentity {
+        let identities = processes
+            .iter()
+            .map(|process| ProcessIdentity {
                 pid: process.pid,
                 start_time: process.start_time,
-            };
-            match kill(&identity) {
-                Ok(()) => {}
-                Err(ProcessError::OpenFailed { detail, .. })
-                    if detail.contains("No such file or directory") => {}
-                Err(error) => {
-                    remaining.push(identity);
-                    errors.push(error.into());
-                }
-            }
-        }
+            })
+            .collect();
+        let (remaining, errors) = terminate_identities_impl(identities);
         if remaining.is_empty() {
             Ok(())
         } else {
@@ -191,15 +191,45 @@ mod imp {
     pub fn terminate_identities(
         identities: Vec<ProcessIdentity>,
     ) -> (Vec<ProcessIdentity>, Vec<TuneupError>) {
+        terminate_identities_impl(identities)
+    }
+
+    fn terminate_identities_impl(
+        identities: Vec<ProcessIdentity>,
+    ) -> (Vec<ProcessIdentity>, Vec<TuneupError>) {
         let mut remaining = Vec::new();
         let mut errors = Vec::new();
-        for identity in identities {
-            match kill(&identity) {
+
+        // Phase 1: graceful SIGTERM for everything still matching its identity.
+        let mut terminating: Vec<ProcessIdentity> = Vec::new();
+        for identity in &identities {
+            match signal_identity(identity, libc::SIGTERM) {
+                Ok(()) => terminating.push(identity.clone()),
+                // Already exited — counts as success.
+                Err(ProcessError::OpenFailed { detail, .. })
+                    if detail.contains("No such file or directory") => {}
+                Err(error) => {
+                    remaining.push(identity.clone());
+                    errors.push(error.into());
+                }
+            }
+        }
+
+        // Phase 2: give processes time to save state and exit.
+        let deadline = Instant::now() + GRACE;
+        while Instant::now() < deadline && !terminating.is_empty() {
+            thread::sleep(POLL_INTERVAL);
+            terminating.retain(|identity| verify_identity(identity).is_ok());
+        }
+
+        // Phase 3: SIGKILL the survivors.
+        for identity in &terminating {
+            match signal_identity(identity, libc::SIGKILL) {
                 Ok(()) => {}
                 Err(ProcessError::OpenFailed { detail, .. })
                     if detail.contains("No such file or directory") => {}
                 Err(error) => {
-                    remaining.push(identity);
+                    remaining.push(identity.clone());
                     errors.push(error.into());
                 }
             }
@@ -207,10 +237,13 @@ mod imp {
         (remaining, errors)
     }
 
-    fn kill(identity: &ProcessIdentity) -> Result<(), ProcessError> {
+    fn signal_identity(
+        identity: &ProcessIdentity,
+        signal: libc::c_int,
+    ) -> Result<(), ProcessError> {
         verify_identity(identity)?;
-        // SAFETY: `kill` receives a positive, identity-verified PID and SIGKILL.
-        if unsafe { libc::kill(identity.pid as libc::pid_t, libc::SIGKILL) } != 0 {
+        // SAFETY: `kill` receives a positive, identity-verified PID and a libc signal.
+        if unsafe { libc::kill(identity.pid as libc::pid_t, signal) } != 0 {
             return Err(ProcessError::SignalFailed {
                 pid: identity.pid,
                 detail: io::Error::last_os_error().to_string(),
@@ -220,42 +253,32 @@ mod imp {
     }
 
     fn verify_identity(identity: &ProcessIdentity) -> Result<(), ProcessError> {
-        let stat_path = format!("/proc/{}/stat", identity.pid);
-        let stat = fs::read_to_string(&stat_path).map_err(|error| ProcessError::OpenFailed {
-            pid: identity.pid,
-            detail: error.to_string(),
-        })?;
-        let proc_stat =
-            fs::read_to_string("/proc/stat").map_err(|error| ProcessError::OpenFailed {
-                pid: identity.pid,
-                detail: error.to_string(),
-            })?;
-        let boot_time = proc_stat
-            .lines()
-            .find_map(|line| line.strip_prefix("btime "))
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| ProcessError::OpenFailed {
-                pid: identity.pid,
-                detail: "в /proc/stat нет btime".to_owned(),
-            })?;
-        // SAFETY: `_SC_CLK_TCK` is a read-only process configuration query.
-        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        if ticks <= 0 {
-            return Err(ProcessError::OpenFailed {
-                pid: identity.pid,
-                detail: "sysconf(_SC_CLK_TCK) вернул ошибку".to_owned(),
-            });
-        }
-        let actual = proc_start_time(&stat, boot_time, ticks as u64).map_err(|detail| {
-            ProcessError::OpenFailed {
+        let actual =
+            current_start_time(identity.pid).map_err(|detail| ProcessError::OpenFailed {
                 pid: identity.pid,
                 detail,
-            }
-        })?;
+            })?;
         if actual != identity.start_time {
             return Err(ProcessError::IdentityMismatch { pid: identity.pid });
         }
         Ok(())
+    }
+
+    /// Reads the current start_time of a PID straight from `/proc`.
+    pub(super) fn current_start_time(pid: u32) -> Result<u64, String> {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|e| e.to_string())?;
+        let proc_stat = fs::read_to_string("/proc/stat").map_err(|e| e.to_string())?;
+        let boot_time = proc_stat
+            .lines()
+            .find_map(|line| line.strip_prefix("btime "))
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| "в /proc/stat нет btime".to_owned())?;
+        // SAFETY: `_SC_CLK_TCK` is a read-only process configuration query.
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if ticks <= 0 {
+            return Err("sysconf(_SC_CLK_TCK) вернул ошибку".to_owned());
+        }
+        proc_start_time(&stat, boot_time, ticks as u64)
     }
 }
 
@@ -282,5 +305,81 @@ mod tests {
             memory_bytes: 0,
         };
         assert!(validate_process(&process).is_some());
+    }
+
+    /// End-to-end check of the graceful terminate path against a real process
+    /// (a second instance of the test binary running one ignored sleeping test).
+    #[cfg(target_os = "linux")]
+    mod graceful_tests {
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        use super::super::imp;
+        use super::*;
+
+        #[test]
+        #[ignore = "worker process; spawned by terminate_gracefully_stops_spawned_worker"]
+        fn sleep_worker() {
+            if std::env::var_os("TUNEUP_TEST_WORKER").is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_secs(60));
+        }
+
+        #[test]
+        fn terminate_gracefully_stops_spawned_worker() {
+            let exe = std::env::current_exe().expect("current exe");
+            let mut child = Command::new(exe)
+                .args([
+                    "--exact",
+                    "sleep_worker",
+                    "--ignored",
+                    "--test-threads",
+                    "1",
+                ])
+                .env("TUNEUP_TEST_WORKER", "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn worker");
+            let pid = child.id();
+            let identity = loop {
+                if let Ok(start_time) = imp::current_start_time(pid) {
+                    break ProcessIdentity { pid, start_time };
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+
+            let result = imp::terminate(&[identity.into_info()]);
+            assert!(result.is_ok(), "graceful terminate failed: {result:?}");
+            let mut exited = false;
+            for _ in 0..50 {
+                if child.try_wait().ok().flatten().is_some() {
+                    exited = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            assert!(exited, "worker did not exit after terminate");
+        }
+
+        trait IdentityExt {
+            fn into_info(self) -> ProcessInfo;
+        }
+        impl IdentityExt for ProcessIdentity {
+            fn into_info(self) -> ProcessInfo {
+                ProcessInfo {
+                    pid: self.pid,
+                    name: "sleep_worker".to_owned(),
+                    path: None,
+                    parent_pid: None,
+                    start_time: self.start_time,
+                    cpu_usage: 0.0,
+                    memory_bytes: 0,
+                }
+            }
+        }
     }
 }

@@ -35,8 +35,8 @@ impl HelperServer {
     }
 }
 
-pub fn load_or_create_session_key(existing: Option<[u8; 32]>) -> Result<[u8; 32], IpcError> {
-    platform::load_or_create_session_key(existing)
+pub fn load_or_create_session_key() -> Result<[u8; 32], IpcError> {
+    platform::load_or_create_session_key()
 }
 
 pub fn load_session_key() -> Result<[u8; 32], IpcError> {
@@ -74,8 +74,8 @@ mod platform {
         }
     }
 
-    pub fn load_or_create_session_key(existing: Option<[u8; 32]>) -> Result<[u8; 32], IpcError> {
-        Ok(existing.unwrap_or([0; 32]))
+    pub fn load_or_create_session_key() -> Result<[u8; 32], IpcError> {
+        Ok([0; 32])
     }
 
     pub fn load_session_key() -> Result<[u8; 32], IpcError> {
@@ -710,29 +710,23 @@ mod platform {
         Ok(())
     }
 
-    pub fn load_or_create_session_key(existing: Option<[u8; 32]>) -> Result<[u8; 32], IpcError> {
-        let key = match existing {
-            Some(key) => key,
-            None => {
-                let mut key = [0u8; 32];
-                // SAFETY: Buffer is valid; system-preferred RNG requires no algorithm handle.
-                let status = unsafe {
-                    windows_sys::Win32::Security::Cryptography::BCryptGenRandom(
-                        ptr::null_mut(),
-                        key.as_mut_ptr(),
-                        key.len() as u32,
-                        windows_sys::Win32::Security::Cryptography::BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-                    )
-                };
-                if status < 0 {
-                    return Err(IpcError::BrokenPipe(format!(
-                        "BCryptGenRandom: 0x{:08X}",
-                        status as u32
-                    )));
-                }
-                key
-            }
+    pub fn load_or_create_session_key() -> Result<[u8; 32], IpcError> {
+        let mut key = [0u8; 32];
+        // SAFETY: Buffer is valid; system-preferred RNG requires no algorithm handle.
+        let status = unsafe {
+            windows_sys::Win32::Security::Cryptography::BCryptGenRandom(
+                ptr::null_mut(),
+                key.as_mut_ptr(),
+                key.len() as u32,
+                windows_sys::Win32::Security::Cryptography::BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
         };
+        if status < 0 {
+            return Err(IpcError::BrokenPipe(format!(
+                "BCryptGenRandom: 0x{:08X}",
+                status as u32
+            )));
+        }
         write_session_key(&key)?;
         Ok(key)
     }

@@ -502,10 +502,20 @@ pub fn path_is_within(candidate: &Path, root: &Path) -> bool {
     candidate.starts_with(&root)
 }
 
+/// Normalizes a path for grouping and matching.
+///
+/// Case folding is applied only on platforms with case-insensitive filesystems
+/// (Windows, default macOS). On Linux `/App` and `/app` are different
+/// directories and must never collapse into the same group.
 pub fn normalize_path(path: &Path) -> String {
-    path.to_string_lossy()
+    let text = path
+        .to_string_lossy()
         .replace('\\', "/")
         .trim_start_matches("//?/")
         .trim_end_matches('/')
-        .to_ascii_lowercase()
+        .to_owned();
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    return text.to_ascii_lowercase();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    return text;
 }

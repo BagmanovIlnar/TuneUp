@@ -13,3 +13,6 @@ tuneup-platform = { path = "../tuneup-platform" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.189"
+# Native plist (XML + binary) parsing: spawning `plutil` per Info.plist key
+# cost hundreds of subprocesses per inventory refresh.
+plist = "1"

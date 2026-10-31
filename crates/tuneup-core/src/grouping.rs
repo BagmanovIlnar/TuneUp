@@ -253,10 +253,7 @@ impl GroupResolver {
     fn root_for_related_support(&self, process: &ProcessInfo) -> Option<PathBuf> {
         let path = process.path.as_deref()?;
         for record in &self.installs {
-            let display = record
-                .display_name
-                .as_deref()
-                .unwrap_or(record.id.as_str());
+            let display = record.display_name.as_deref().unwrap_or(record.id.as_str());
             for root in related_support_roots(&record.install_root, display) {
                 if path_is_within(path, &root) || normalize_path(path) == normalize_path(&root) {
                     return Some(record.install_root.clone());
@@ -275,17 +272,18 @@ pub fn expand_sleep_processes(
     group: &ProcessGroup,
     all_processes: &[ProcessInfo],
 ) -> Vec<ProcessInfo> {
-    let mut by_pid = all_processes
+    let mut live_by_pid = all_processes
         .iter()
         .map(|process| (process.pid, process))
         .collect::<HashMap<_, _>>();
     let mut selected = HashMap::<u32, ProcessInfo>::new();
     for process in &group.processes {
-        selected.insert(process.pid, process.clone());
         // Prefer fresher snapshot data when available.
-        if let Some(live) = by_pid.remove(&process.pid) {
-            selected.insert(process.pid, live.clone());
-        }
+        let fresh = live_by_pid.remove(&process.pid);
+        selected.insert(
+            process.pid,
+            fresh.cloned().unwrap_or_else(|| process.clone()),
+        );
     }
 
     let children = build_children_index(all_processes);
@@ -298,8 +296,8 @@ pub fn expand_sleep_processes(
             if selected.contains_key(child) {
                 continue;
             }
-            if let Some(process) = all_processes.iter().find(|process| process.pid == *child) {
-                selected.insert(process.pid, process.clone());
+            if let Some(process) = live_by_pid.get(child) {
+                selected.insert(process.pid, (*process).clone());
                 stack.push(process.pid);
             }
         }
@@ -314,15 +312,16 @@ pub fn expand_sleep_processes(
             let Some(path) = process.path.as_deref() else {
                 continue;
             };
-            if roots
-                .iter()
-                .any(|root| path_is_within(path, root) || normalize_path(path) == normalize_path(root))
-            {
+            if roots.iter().any(|root| {
+                path_is_within(path, root) || normalize_path(path) == normalize_path(root)
+            }) {
                 selected.insert(process.pid, process.clone());
             }
         }
         if looks_like_jetbrains_product(install_root, &group.name)
-            && let Some(daemon) = all_processes.iter().find(|process| is_jetbrains_daemon(process))
+            && let Some(daemon) = all_processes
+                .iter()
+                .find(|process| is_jetbrains_daemon(process))
             && !selected.contains_key(&daemon.pid)
             && jetbrains_active_install_roots(all_processes).len() <= 1
         {
@@ -468,10 +467,10 @@ fn jetbrains_product_root_from_path(path: &Path) -> Option<PathBuf> {
         candidate
             .extension()
             .is_some_and(|extension| extension == "app")
-    }) {
-        if looks_like_jetbrains_product(app, "") && !is_jetbrains_daemon_root(app) {
-            return Some(app.to_path_buf());
-        }
+    }) && looks_like_jetbrains_product(app, "")
+        && !is_jetbrains_daemon_root(app)
+    {
+        return Some(app.to_path_buf());
     }
     // Skip the executable itself: `/opt/PhpStorm-…/bin/phpstorm` would otherwise
     // match as a "product" because its file stem contains `phpstorm`.
@@ -514,7 +513,10 @@ fn is_jetbrains_daemon_root(root: &Path) -> bool {
 }
 
 fn attach_jetbrains_daemon(assigned: &mut HashMap<u32, PathBuf>, processes: &[ProcessInfo]) {
-    let Some(daemon) = processes.iter().find(|process| is_jetbrains_daemon(process)) else {
+    let Some(daemon) = processes
+        .iter()
+        .find(|process| is_jetbrains_daemon(process))
+    else {
         return;
     };
     if assigned
@@ -568,7 +570,10 @@ fn is_shared_install_root(path: &Path) -> bool {
         "/var",
         "/var/lib",
     ];
-    if ABSOLUTE.iter().any(|candidate| path == Path::new(candidate)) {
+    if ABSOLUTE
+        .iter()
+        .any(|candidate| path == Path::new(candidate))
+    {
         return true;
     }
     // User profile hubs — a root here would absorb JetBrains Daemon, DBeaverData, etc.
@@ -875,7 +880,10 @@ mod tests {
     fn expand_sleep_includes_descendants_and_jetbrains_daemon() {
         let mut parent = process(10, "/Applications/RustRover.app/Contents/MacOS/rustrover");
         parent.name = "rustrover".into();
-        let mut child = process(11, "/Applications/RustRover.app/Contents/helpers/fsnotifier");
+        let mut child = process(
+            11,
+            "/Applications/RustRover.app/Contents/helpers/fsnotifier",
+        );
         child.name = "fsnotifier".into();
         child.parent_pid = Some(10);
         let mut daemon = process(
@@ -898,7 +906,10 @@ mod tests {
             policy: GroupPolicy::Manual,
         };
         let expanded = expand_sleep_processes(&group, &[parent, child, daemon]);
-        let pids = expanded.iter().map(|process| process.pid).collect::<Vec<_>>();
+        let pids = expanded
+            .iter()
+            .map(|process| process.pid)
+            .collect::<Vec<_>>();
         assert!(pids.contains(&10));
         assert!(pids.contains(&11));
         assert!(pids.contains(&12));

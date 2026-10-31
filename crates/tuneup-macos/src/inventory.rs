@@ -35,8 +35,6 @@ mod imp {
         process::Command,
     };
 
-    #[cfg(test)]
-    use serde_json::Value;
     use tuneup_core::model::{
         AutoStartEntry, ExecutableRef, InstallRecord, InstallSource, LaunchdDomain, LoginItemKind,
     };
@@ -168,16 +166,17 @@ end tell"#;
     fn app_record(path: &Path) -> Result<InstallRecord, String> {
         let root =
             fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        let plist = root.join("Contents/Info.plist");
+        let info = read_plist_dictionary(&root.join("Contents/Info.plist"))
+            .ok_or_else(|| format!("{}: Info.plist не читается", path.display()))?;
         let fallback = path
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or("Application")
             .to_owned();
-        let id = extract_plist_string(&plist, "CFBundleIdentifier")
+        let id = dictionary_string(&info, "CFBundleIdentifier")
             .unwrap_or_else(|| root.display().to_string());
-        let bundle_name = extract_plist_string(&plist, "CFBundleDisplayName")
-            .or_else(|| extract_plist_string(&plist, "CFBundleName"));
+        let bundle_name = dictionary_string(&info, "CFBundleDisplayName")
+            .or_else(|| dictionary_string(&info, "CFBundleName"));
         // Prefer the Finder/.app name when the bundle label is a short Electron
         // stub such as "Code" — users search for "Visual Studio Code".
         let display_name = match bundle_name {
@@ -192,8 +191,8 @@ end tell"#;
             id,
             display_name,
             install_root: root,
-            version: extract_plist_string(&plist, "CFBundleShortVersionString")
-                .or_else(|| extract_plist_string(&plist, "CFBundleVersion")),
+            version: dictionary_string(&info, "CFBundleShortVersionString")
+                .or_else(|| dictionary_string(&info, "CFBundleVersion")),
             publisher: None,
         })
     }
@@ -280,27 +279,42 @@ end tell"#;
     }
 
     fn parse_launchd_plist_path(path: &Path) -> Result<ParsedLaunchd, String> {
-        let label = extract_plist_string(path, "Label")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("{}: launchd plist не содержит Label", path.display()))?;
-        let program = extract_plist_string(path, "Program")
-            .or_else(|| extract_plist_string(path, "ProgramArguments.0"))
+        let dictionary = read_plist_dictionary(path)
+            .ok_or_else(|| format!("{}: launchd plist не читается", path.display()))?;
+        parsed_from_dictionary(&dictionary)
+            .map_err(|detail| format!("{}: {detail}", path.display()))
+    }
+
+    fn parsed_from_dictionary(dictionary: &plist::Dictionary) -> Result<ParsedLaunchd, String> {
+        let label = dictionary_string(dictionary, "Label")
+            .ok_or_else(|| "launchd plist не содержит Label".to_owned())?;
+        let program = dictionary_string(dictionary, "Program")
+            .or_else(|| program_arguments_zero(dictionary))
             .filter(|value| !value.is_empty())
             .ok_or_else(|| format!("launchd {label} не содержит Program"))?;
         Ok(ParsedLaunchd { label, program })
     }
 
-    fn extract_plist_string(path: &Path, key: &str) -> Option<String> {
-        let output = Command::new("/usr/bin/plutil")
-            .args(["-extract", key, "raw", "-o", "-", "--"])
-            .arg(path)
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        (!value.is_empty()).then_some(value)
+    fn program_arguments_zero(dictionary: &plist::Dictionary) -> Option<String> {
+        dictionary
+            .get("ProgramArguments")
+            .and_then(plist::Value::as_array)
+            .and_then(|arguments| arguments.first())
+            .and_then(plist::Value::as_string)
+            .map(str::to_owned)
+    }
+
+    /// Reads a plist (XML or binary) without spawning `plutil`.
+    fn read_plist_dictionary(path: &Path) -> Option<plist::Dictionary> {
+        plist::Value::from_file(path).ok()?.into_dictionary()
+    }
+
+    fn dictionary_string(dictionary: &plist::Dictionary, key: &str) -> Option<String> {
+        dictionary
+            .get(key)
+            .and_then(plist::Value::as_string)
+            .map(str::to_owned)
+            .filter(|value| !value.is_empty())
     }
 
     struct ParsedLaunchd {
@@ -309,43 +323,33 @@ end tell"#;
     }
 
     #[cfg(test)]
-    fn parse_launchd_plist(plist: &Value) -> Result<ParsedLaunchd, String> {
-        let label = string_value(plist, "Label")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "launchd plist не содержит Label".to_owned())?;
-        let program = string_value(plist, "Program")
-            .or_else(|| {
-                plist
-                    .get("ProgramArguments")
-                    .and_then(Value::as_array)
-                    .and_then(|arguments| arguments.first())
-                    .and_then(Value::as_str)
-            })
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| format!("launchd {label} не содержит Program"))?;
-        Ok(ParsedLaunchd {
-            label: label.to_owned(),
-            program: program.to_owned(),
-        })
-    }
-
-    #[cfg(test)]
-    fn string_value<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
-        value.get(key).and_then(Value::as_str)
-    }
-
-    #[cfg(test)]
     mod tests {
-        use serde_json::json;
-
         use super::*;
+
+        fn dictionary(entries: Vec<(&str, plist::Value)>) -> plist::Dictionary {
+            let mut dictionary = plist::Dictionary::new();
+            for (key, value) in entries {
+                dictionary.insert(key.to_owned(), value);
+            }
+            dictionary
+        }
+
+        fn text(value: &str) -> plist::Value {
+            plist::Value::from(value)
+        }
 
         #[test]
         fn parses_program_arguments_fallback() {
-            let parsed = parse_launchd_plist(&json!({
-                "Label": "com.example.worker",
-                "ProgramArguments": ["/Applications/Demo.app/Contents/MacOS/Demo", "--quiet"]
-            }))
+            let parsed = parsed_from_dictionary(&dictionary(vec![
+                ("Label", text("com.example.worker")),
+                (
+                    "ProgramArguments",
+                    plist::Value::Array(vec![
+                        text("/Applications/Demo.app/Contents/MacOS/Demo"),
+                        text("--quiet"),
+                    ]),
+                ),
+            ]))
             .expect("parse launchd fixture");
             assert_eq!(parsed.label, "com.example.worker");
             assert_eq!(parsed.program, "/Applications/Demo.app/Contents/MacOS/Demo");
@@ -353,18 +357,33 @@ end tell"#;
 
         #[test]
         fn program_takes_precedence_over_arguments() {
-            let parsed = parse_launchd_plist(&json!({
-                "Label": "com.example.worker",
-                "Program": "/opt/example/worker",
-                "ProgramArguments": ["/wrong"]
-            }))
+            let parsed = parsed_from_dictionary(&dictionary(vec![
+                ("Label", text("com.example.worker")),
+                ("Program", text("/opt/example/worker")),
+                (
+                    "ProgramArguments",
+                    plist::Value::Array(vec![text("/wrong")]),
+                ),
+            ]))
             .expect("parse launchd fixture");
             assert_eq!(parsed.program, "/opt/example/worker");
         }
 
         #[test]
         fn rejects_missing_label() {
-            assert!(parse_launchd_plist(&json!({"Program": "/bin/echo"})).is_err());
+            let parsed = parsed_from_dictionary(&dictionary(vec![("Program", text("/bin/echo"))]));
+            assert!(parsed.is_err());
+        }
+
+        #[test]
+        fn reads_real_binary_plist_without_plutil() {
+            // System bundles ship binary Info.plist — prove the native reader works.
+            let path = PathBuf::from("/System/Applications/Stocks.app/Contents/Info.plist");
+            if !path.exists() {
+                return;
+            }
+            let info = read_plist_dictionary(&path).expect("binary Info.plist must parse natively");
+            assert!(dictionary_string(&info, "CFBundleIdentifier").is_some());
         }
 
         #[test]
