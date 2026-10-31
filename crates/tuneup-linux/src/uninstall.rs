@@ -308,8 +308,8 @@ fn application_data_dirs() -> Vec<PathBuf> {
     if let Some(data_home) = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
         dirs.push(data_home.join("applications"));
     }
-    let data_dirs = std::env::var("XDG_DATA_DIRS")
-        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
+    let data_dirs =
+        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned());
     for dir in data_dirs.split(':').filter(|value| !value.is_empty()) {
         dirs.push(PathBuf::from(dir).join("applications"));
     }
@@ -337,7 +337,12 @@ fn package_owning_path(path: &Path) -> Option<(InstallSource, String, Option<Str
         }
     }
     if let Ok(output) = Command::new("rpm")
-        .args(["-qf", "--qf", "%{NAME}\t%{VERSION}-%{RELEASE}\n", &path.display().to_string()])
+        .args([
+            "-qf",
+            "--qf",
+            "%{NAME}\t%{VERSION}-%{RELEASE}\n",
+            &path.display().to_string(),
+        ])
         .output()
         && output.status.success()
     {
@@ -365,9 +370,7 @@ fn package_version_deb(package: &str) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let version = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_owned();
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (!version.is_empty()).then_some(version)
 }
 
@@ -446,7 +449,9 @@ fn append_desktop_applications(
                 version,
                 publisher: None,
                 source,
-                install_root: binary.as_ref().and_then(|path| path.parent().map(Path::to_path_buf)),
+                install_root: binary
+                    .as_ref()
+                    .and_then(|path| path.parent().map(Path::to_path_buf)),
                 estimated_size: None,
                 uninstall_kind,
                 uninstall_identifier,
