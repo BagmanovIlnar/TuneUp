@@ -1,8 +1,13 @@
 //! Ensures only one TuneUp GUI process runs at a time.
 //!
 //! The primary instance binds a localhost TCP port and listens for a wake
-//! command. A second launch connects, asks the primary to show the main window,
-//! then exits without starting another UI.
+//! command. A second launch connects, asks the primary to show the main window
+//! (the primary acknowledges with `TUNEUP-OK`), then exits without starting
+//! another UI.
+//!
+//! If the port is held by a *foreign* application, TuneUp logs a warning and
+//! starts anyway (without the single-instance guard) instead of silently
+//! refusing to launch.
 
 use std::{
     io::{Read, Write},
@@ -23,9 +28,38 @@ use crate::tray::TrayAction;
 /// Localhost port reserved for TuneUp single-instance wake protocol.
 const PORT: u16 = 47_821;
 const MAGIC: &[u8] = b"TUNEUP-SHOW\n";
+const ACK: &[u8] = b"TUNEUP-OK\n";
 
 /// Slot filled with `egui::Context` once the UI starts (for immediate wake).
 pub type ContextSlot = Arc<Mutex<Option<egui::Context>>>;
+
+/// Outcome of a single-instance check.
+pub enum Started {
+    /// We are the primary instance; the guard keeps the listener alive.
+    Primary(InstanceGuard),
+    /// Another TuneUp answered and was asked to show its window; exit now.
+    Secondary,
+}
+
+/// Reasons the single-instance guard could not be established.
+#[derive(Debug)]
+pub enum StartError {
+    /// The port is busy but the owner did not answer like TuneUp.
+    ForeignPortOwner(String),
+    /// The listener thread could not be started.
+    ListenerFailed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ForeignPortOwner(detail) => {
+                write!(f, "порт {PORT} занят другим приложением: {detail}")
+            }
+            Self::ListenerFailed(detail) => write!(f, "не запущен слушатель: {detail}"),
+        }
+    }
+}
 
 /// Holds the primary-instance listener thread until drop.
 pub struct InstanceGuard {
@@ -54,16 +88,27 @@ pub fn context_slot() -> ContextSlot {
 /// Becomes the primary instance, or notifies an already-running primary to show
 /// its window.
 ///
+/// # Errors
+///
+/// - [`StartError::ForeignPortOwner`] — the port is taken by something that
+///   does not speak the TuneUp wake protocol. The caller should continue
+///   starting the app without the guard.
+///
 /// # Example
 ///
 /// ```ignore
 /// let slot = context_slot();
 /// let (tx, rx) = std::sync::mpsc::channel();
-/// let Ok(_guard) = ensure_single(tx.clone(), slot.clone()) else {
-///     return; // secondary: primary was asked to open the window
-/// };
+/// match ensure_single(tx.clone(), slot.clone()) {
+///     Ok(Started::Primary(_guard)) => { /* run the UI */ }
+///     Ok(Started::Secondary) => return, // primary shows its window
+///     Err(error) => { /* log and run the UI without the guard */ }
+/// }
 /// ```
-pub fn ensure_single(show_tx: Sender<TrayAction>, context_slot: ContextSlot) -> Result<InstanceGuard, ()> {
+pub fn ensure_single(
+    show_tx: Sender<TrayAction>,
+    context_slot: ContextSlot,
+) -> Result<Started, StartError> {
     match TcpListener::bind(("127.0.0.1", PORT)) {
         Ok(listener) => {
             let stop = Arc::new(AtomicBool::new(false));
@@ -77,19 +122,21 @@ pub fn ensure_single(show_tx: Sender<TrayAction>, context_slot: ContextSlot) -> 
                             Ok((mut stream, _)) => {
                                 let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
                                 let mut buf = [0_u8; 32];
-                                match stream.read(&mut buf) {
-                                    Ok(n) if buf[..n].starts_with(MAGIC) => {
-                                        tracing::info!(
-                                            "second launch detected; showing main window"
-                                        );
-                                        let _ = show_tx.send(TrayAction::OpenMainWindow);
-                                        if let Ok(guard) = context_slot.lock() {
-                                            if let Some(context) = guard.as_ref() {
-                                                context.request_repaint();
-                                            }
-                                        }
+                                if let Ok(n) = stream.read(&mut buf)
+                                    && buf[..n].starts_with(MAGIC)
+                                {
+                                    // Acknowledge so the second launch can
+                                    // tell a real TuneUp from a foreign
+                                    // port owner.
+                                    let _ = stream.write_all(ACK);
+                                    let _ = stream.flush();
+                                    tracing::info!("second launch detected; showing main window");
+                                    let _ = show_tx.send(TrayAction::OpenMainWindow);
+                                    if let Ok(guard) = context_slot.lock()
+                                        && let Some(context) = guard.as_ref()
+                                    {
+                                        context.request_repaint();
                                     }
-                                    _ => {}
                                 }
                             }
                             Err(error)
@@ -102,24 +149,25 @@ pub fn ensure_single(show_tx: Sender<TrayAction>, context_slot: ContextSlot) -> 
                         }
                     }
                 })
-                .map_err(|error| {
-                    tracing::error!(%error, "failed to start single-instance listener");
-                })?;
+                .map_err(|error| StartError::ListenerFailed(error.to_string()))?;
             tracing::info!(port = PORT, "single-instance primary ready");
-            Ok(InstanceGuard {
+            Ok(Started::Primary(InstanceGuard {
                 stop,
                 join: Some(join),
-            })
+            }))
         }
-        Err(error) => {
-            tracing::info!(%error, "TuneUp already running; requesting show");
-            notify_primary_show();
-            Err(())
-        }
+        Err(error) => match notify_primary_show() {
+            // A real TuneUp answered — it will show its window; we exit.
+            true => Ok(Started::Secondary),
+            // The port owner is not TuneUp. Starting anyway beats refusing
+            // to launch; the only cost is the single-instance guard.
+            false => Err(StartError::ForeignPortOwner(error.to_string())),
+        },
     }
 }
 
-fn notify_primary_show() {
+/// Sends the wake command and waits for the TuneUp acknowledgement.
+fn notify_primary_show() -> bool {
     match TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], PORT)),
         Duration::from_millis(500),
@@ -127,12 +175,26 @@ fn notify_primary_show() {
         Ok(mut stream) => {
             if let Err(error) = stream.write_all(MAGIC) {
                 tracing::warn!(%error, "failed to send show request to primary");
-            } else {
-                let _ = stream.flush();
+                return false;
+            }
+            let _ = stream.flush();
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(800)));
+            let mut buf = [0_u8; 16];
+            match stream.read(&mut buf) {
+                Ok(n) if buf[..n].starts_with(ACK) => true,
+                Ok(_) => {
+                    tracing::warn!("port owner answered, but is not TuneUp");
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "port owner did not answer like TuneUp");
+                    false
+                }
             }
         }
         Err(error) => {
             tracing::warn!(%error, "could not reach primary TuneUp instance");
+            false
         }
     }
 }

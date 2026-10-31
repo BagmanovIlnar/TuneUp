@@ -23,11 +23,20 @@ fn main() -> eframe::Result {
     let _logging = logging::init().ok();
     let (tray_event_tx, tray_event_rx) = mpsc::channel();
     let context_slot = single_instance::context_slot();
-    let Ok(_instance) = single_instance::ensure_single(tray_event_tx.clone(), context_slot.clone())
-    else {
-        // Another TuneUp is already running — asked it to show the window.
-        return Ok(());
-    };
+    let _instance_guard =
+        match single_instance::ensure_single(tray_event_tx.clone(), context_slot.clone()) {
+            Ok(single_instance::Started::Primary(guard)) => Some(guard),
+            Ok(single_instance::Started::Secondary) => {
+                // Another TuneUp is already running — it was asked to show the window.
+                return Ok(());
+            }
+            Err(error) => {
+                // The port is held by a foreign app: continue without the guard
+                // instead of silently refusing to start.
+                tracing::warn!(%error, "single-instance guard unavailable; continuing");
+                None
+            }
+        };
     tracing::info!("TuneUp starting (tray-only until window is opened)");
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

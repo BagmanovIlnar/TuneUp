@@ -81,10 +81,15 @@ TuneUp:
 - расширяет группу (дочерние процессы, каталоги Application Support / AppData /
   `.config`, общий `jetbrainsd` при безопасных условиях);
 - отклоняет системные / denylist-процессы;
-- шлёт **SIGKILL** (macOS/Linux) или **TerminateProcess** (Windows);
+- завершает процессы **мягко**: сначала `SIGTERM`, затем до 2 секунд на
+  сохранение состояния, после — `SIGKILL` (macOS/Linux); на Windows —
+  `TerminateProcess`;
 - отключает только точно сопоставленные LaunchAgents, Login Items, Run/Startup,
   tasks, services, XDG, systemd units;
 - сохраняет backup для отката.
+
+Переходы сна/пробуждения выполняются в фоновом потоке — интерфейс не
+блокируется, кнопки на время перехода отключаются.
 
 ### Разбудить (кнопка)
 
@@ -98,6 +103,7 @@ TuneUp:
 | Появился процесс **внутри install root** спящей группы | Восстановить автозапуск (**без** повторного launch) + уведомление |
 | Не осталось процессов под install root | Снова усыпить: terminate связанных (включая хелперы вне root) + disable |
 | Группа `Ignored` | Не трогается автоматически |
+| Install root группы исчез/сменён (обновление или удаление приложения) | Авторемонтирование: TuneUp восстанавливает отключённый автозапуск и снимает группу с учёта |
 
 «Приложение запущено» определяется по путям **под install root** (например
 `RustRover.app`). Общий daemon вроде `jetbrainsd` вне бандла **не** держит
@@ -319,7 +325,12 @@ sudo dpkg -i tuneup_1.0.0_amd64.deb
 sudo rpm -Uvh tuneup-1.0.0-1.x86_64.rpm
 ```
 
-Workflow **CI** (`.github/workflows/ci.yml`) на push/PR: `fmt`, `test`, `clippy`.
+Workflow **CI** (`.github/workflows/ci.yml`) на push/PR:
+
+- **linux**: `fmt`, `test`, `clippy`;
+- **windows-cross**: `check` + `clippy` по таргету `x86_64-pc-windows-msvc`
+  (компилируется весь `#[cfg(windows)]` код — named pipes, реестр, службы);
+- **macos**: нативные `fmt` / `test` / `clippy`.
 
 ---
 
@@ -625,10 +636,11 @@ $XDG_STATE_HOME/TuneUp/logs/...            # или ~/TuneUp/logs/
 /var/log/TuneUp/helper.log.YYYY-MM-DD      # system helper
 ```
 
-При повреждении основного файла загружается `state.json.bak`. Перед ручным
-удалением state завершите TuneUp через трей.
+При повреждении основного файла загружается `state.json.bak` — предыдущее
+поколение (оно обновляется при каждой успешной записи; сама запись
+атомарная, с fsync). Перед ручным удалением state завершите TuneUp через трей.
 
-Секреты IPC в логи не пишутся.
+IPC-ключ Windows в `state.json` не хранится — только в `helper.session`.
 
 ---
 
@@ -640,7 +652,11 @@ $XDG_STATE_HOME/TuneUp/logs/...            # или ~/TuneUp/logs/
 - Перед kill — проверка `(pid, start_time)` против reuse PID.
 - Отключение автозапуска только при точном совпадении с install root.
 - Startup-файлы переносятся в `TuneUpDisabled`, не удаляются навсегда.
-- Helper: фиксированные команды, HMAC IPC, без произвольного shell.
+- Helper: фиксированные команды, HMAC IPC, без произвольного shell; после
+  последнего запроса helper Windows живёт с правами администратора не дольше
+  5 минут, затем завершается.
+- Завершение процессов — мягкое: `SIGTERM` → 2 c grace → `SIGKILL`
+  (macOS/Linux); на Windows — `TerminateProcess`.
 
 **Не усыпляйте** системную оболочку, антивирус, драйверы и критичные сервисы.
 
@@ -653,6 +669,8 @@ $XDG_STATE_HOME/TuneUp/logs/...            # или ~/TuneUp/logs/
 | Нет окна после запуска | Откройте иконку в трее / menu bar |
 | После сна остаётся «Running in Background» / daemon | Убедитесь, что сборка свежая; при Auto после закрытия IDE группа должна усыпиться повторно и добить хелперы |
 | Повторный запуск без уведомления (Manual) | Без галочки авто группа не будится сама — нажмите **Разбудить** или включите авто |
+| Приложение «зависло» в состоянии Sleeping после обновления/удаления | TuneUp авторемонтирует такие группы при старте (восстановит автозапуск); иначе нажмите **Сбросить всё** в настройках |
+| Порт 47821 занят другим приложением | TuneUp запустится без защиты от двойного запуска (предупреждение в логе) |
 | Helper не найден (Windows) | Положите `tuneup-helper.exe` рядом с `tuneup.exe` |
 | Manifest helper без UAC | Собирайте helper на Windows-хосте |
 | `Package gio-2.0 was not found` | Устаревшая подсказка для GTK-трея; текущая сборка использует `ksni` и GTK не требует |
