@@ -1,24 +1,27 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
 use eframe::egui::{self, Color32, RichText, ViewportCommand};
 use tuneup_core::{
-    grouping::expand_sleep_processes,
+    grouping::{expand_sleep_processes, stable_id},
     model::{
         GroupPolicy, GroupStatus, ManagedGroupState, ProcessGroup, ProcessIdentity, ProcessInfo,
+        normalize_path,
     },
     policy::{PolicyAction, SleepPolicyEngine},
     state::{PersistedState, StateStore},
 };
 use tuneup_platform::{PlatformCapabilities, PlatformServices, SelfAutostartProvider};
 
+use crate::deactivator::ManagedActionReport;
+
 use crate::{
-    deactivator::DeactivationManager,
     maintenance_worker::{MaintenanceEvent, MaintenanceWorker},
     platform_runtime,
     scanner::{ProcessScanner, ScanSnapshot},
     theme::PlatformTheme,
+    transition_worker::{TransitionEvent, TransitionWorker},
     tray::{TrayAction, TrayController},
     views::{
         cleanup::{CleanupAction, CleanupViewState},
@@ -41,6 +44,20 @@ enum MainSection {
 struct PendingSleep {
     group: ProcessGroup,
     automatic: bool,
+}
+
+/// Kind of an in-flight sleep/wake transition, keyed by group id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransitionKind {
+    Sleep,
+    Wake,
+    Terminate,
+}
+
+/// Tracks an in-progress «Сбросить всё» waiting for wake transitions to finish.
+struct ResetProgress {
+    remaining: usize,
+    errors: Vec<String>,
 }
 
 enum UiAction {
@@ -84,7 +101,9 @@ pub struct TuneupApp {
     state_ready: bool,
     policy: SleepPolicyEngine,
     policy_primed: bool,
-    deactivator: DeactivationManager,
+    transitions: TransitionWorker,
+    transitioning: HashMap<String, TransitionKind>,
+    reset_pending: Option<ResetProgress>,
     pending_sleep: Option<PendingSleep>,
     details_group: Option<String>,
     action_message: Option<(bool, String)>,
@@ -152,9 +171,12 @@ impl TuneupApp {
         } = services;
         let action_message = state_error.or(helper_error).map(|message| (false, message));
         let policy = SleepPolicyEngine::new(state.managed_groups.clone());
-        let maintenance = MaintenanceWorker::start(context, cleanup, uninstaller);
-        let mut settings_view = SettingsViewState::default();
-        settings_view.start_at_login = state.start_at_login;
+        let maintenance = MaintenanceWorker::start(context.clone(), cleanup, uninstaller);
+        let transitions = TransitionWorker::start(context, mutator, process_control, app_launcher);
+        let mut settings_view = SettingsViewState {
+            start_at_login: state.start_at_login,
+            ..SettingsViewState::default()
+        };
         if let Ok(enabled) = self_autostart.is_enabled() {
             settings_view.apply_os_state(enabled);
             state.start_at_login = enabled;
@@ -175,7 +197,9 @@ impl TuneupApp {
             state_ready: action_message.is_none(),
             policy,
             policy_primed: false,
-            deactivator: DeactivationManager::new(mutator, process_control, app_launcher),
+            transitions,
+            transitioning: HashMap::new(),
+            reset_pending: None,
             pending_sleep: None,
             details_group: None,
             action_message,
@@ -225,6 +249,7 @@ impl TuneupApp {
                 self.wake_group(&group_id, false, false);
             }
             self.reenforce_persisted_sleep();
+            self.heal_orphaned_sleeping_groups();
             self.policy.prime(&self.processes);
             self.policy_primed = true;
             return;
@@ -236,6 +261,11 @@ impl TuneupApp {
             match action {
                 PolicyAction::WakeGroup { group_id } => self.wake_group(&group_id, true, false),
                 PolicyAction::SleepGroup { group_id } => {
+                    if self.transitioning.contains_key(&group_id) {
+                        // A transition is already running for this group; the next
+                        // snapshot re-evaluates the policy anyway.
+                        continue;
+                    }
                     let policy = self
                         .state
                         .managed_groups
@@ -248,8 +278,10 @@ impl TuneupApp {
                         .find(|group| group.id == group_id)
                         .cloned()
                         .or_else(|| {
-                            self.state.managed_groups.get(&group_id).map(|state| {
-                                ProcessGroup {
+                            self.state
+                                .managed_groups
+                                .get(&group_id)
+                                .map(|state| ProcessGroup {
                                     id: state.group_id.clone(),
                                     name: state.name.clone(),
                                     install_root: state.match_rules.install_root.clone(),
@@ -260,11 +292,167 @@ impl TuneupApp {
                                     load_score: 0.0,
                                     status: GroupStatus::Active,
                                     policy: state.policy,
-                                }
-                            })
+                                })
                         });
                     if let Some(group) = group {
                         self.sleep_group(group, policy, true);
+                    }
+                }
+            }
+        }
+    }
+
+    fn process_transition_events(&mut self) {
+        for event in self.transitions.take_events() {
+            match event {
+                TransitionEvent::Slept {
+                    group_id,
+                    name,
+                    automatic,
+                    report,
+                } => {
+                    self.transitioning.remove(&group_id);
+                    self.state
+                        .managed_groups
+                        .insert(group_id.clone(), report.state);
+                    self.persist_state();
+                    self.scanner.request_refresh();
+                    self.action_message = Some(if report.errors.is_empty() {
+                        tracing::info!(group_id = %group_id, "sleep transition completed");
+                        crate::notify::app_deactivated(&name, automatic);
+                        (
+                            true,
+                            format!(
+                                "Группа «{name}» {}",
+                                if automatic {
+                                    "автоматически усыплена"
+                                } else {
+                                    "усыплена"
+                                }
+                            ),
+                        )
+                    } else {
+                        tracing::error!(
+                            group_id = %group_id,
+                            errors = report.errors.len(),
+                            "sleep transition completed with errors"
+                        );
+                        (
+                            false,
+                            report
+                                .errors
+                                .into_iter()
+                                .map(|error| error.to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
+                    });
+                }
+                TransitionEvent::Woke {
+                    group_id,
+                    name,
+                    automatic,
+                    orphan,
+                    report,
+                } => {
+                    self.transitioning.remove(&group_id);
+                    if self.reset_pending.is_some() {
+                        self.handle_reset_wake(group_id, name, report);
+                        continue;
+                    }
+                    if orphan {
+                        self.state.managed_groups.remove(&group_id);
+                        tracing::info!(
+                            group_id = %group_id,
+                            "orphaned sleeping group healed: autostart restored"
+                        );
+                    } else if automatic {
+                        // Auto wake keeps AutoSleepWake armed: closing the app will sleep again.
+                        self.state
+                            .managed_groups
+                            .insert(group_id.clone(), report.state);
+                    } else if report.state.lifecycle == GroupStatus::Sleeping
+                        || !report.state.processes.is_empty()
+                        || !report.state.platform.is_empty()
+                    {
+                        // Incomplete manual wake — keep a Manual entry so the user can retry.
+                        let mut state = report.state;
+                        state.policy = GroupPolicy::Manual;
+                        self.state.managed_groups.insert(group_id.clone(), state);
+                    }
+                    // Successful manual wake: do not re-insert. Leaving managed_groups means
+                    // closing the app will not put it back to sleep.
+                    self.persist_state();
+                    self.scanner.request_refresh();
+                    crate::notify::app_activated(&name, automatic);
+                    self.action_message = Some(if report.errors.is_empty() {
+                        tracing::info!(group_id = %group_id, automatic, "wake transition completed");
+                        (
+                            true,
+                            format!(
+                                "Группа «{name}» {}",
+                                if automatic {
+                                    "автоматически пробуждена"
+                                } else {
+                                    "пробуждена и снята с режима сна"
+                                }
+                            ),
+                        )
+                    } else {
+                        tracing::error!(
+                            group_id = %group_id,
+                            errors = report.errors.len(),
+                            "wake transition completed with errors"
+                        );
+                        (
+                            false,
+                            report
+                                .errors
+                                .into_iter()
+                                .map(|error| error.to_string())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                        )
+                    });
+                }
+                TransitionEvent::Terminated {
+                    group_id,
+                    name,
+                    result,
+                } => {
+                    self.transitioning.remove(&group_id);
+                    match result {
+                        Ok(()) => {
+                            tracing::info!(group_id = %group_id, "re-enforced persisted sleep");
+                            crate::notify::app_deactivated(&name, true);
+                        }
+                        Err((_remaining, errors)) => {
+                            for error in errors {
+                                tracing::error!(
+                                    group_id = %group_id,
+                                    error = %error,
+                                    "re-enforce sleep failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                TransitionEvent::LegacyFreezeFinished {
+                    group_id,
+                    remaining,
+                    errors,
+                } => {
+                    self.transitioning.remove(&group_id);
+                    if let Some(state) = self.state.managed_groups.get_mut(&group_id) {
+                        state.processes = remaining;
+                        self.persist_state();
+                    }
+                    for error in errors {
+                        tracing::error!(
+                            group_id = %group_id,
+                            error = %error,
+                            "legacy freeze terminate failed"
+                        );
                     }
                 }
             }
@@ -340,6 +528,22 @@ impl TuneupApp {
     }
 
     fn request_exit(&mut self, context: &egui::Context) {
+        // Finish in-flight sleep/wake transitions first: their reports carry the
+        // platform autostart backups that exist nowhere else. Exiting with a
+        // transition half-done would leave autostart disabled with no backup.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !self.transitioning.is_empty() && std::time::Instant::now() < deadline {
+            self.process_transition_events();
+            if !self.transitioning.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        if !self.transitioning.is_empty() {
+            tracing::warn!(
+                remaining = self.transitioning.len(),
+                "exit with in-flight transitions; last persisted state is kept"
+            );
+        }
         // Sleeping groups stay asleep across TuneUp restarts.
         // Do not restore autostart or clear managed state on exit.
         if self.persist_state() {
@@ -385,47 +589,16 @@ impl TuneupApp {
                 start_time: process.start_time,
             })
             .collect();
+        let name = group.name.clone();
         self.state.managed_groups.insert(group.id.clone(), intent);
         if !self.persist_state() {
+            // Keep the intent so the startup reconcile can roll it back.
             return;
         }
-        let report = self.deactivator.sleep(&group, policy);
-        self.state
-            .managed_groups
-            .insert(group.id.clone(), report.state);
-        self.persist_state();
-        self.scanner.request_refresh();
-        self.action_message = Some(if report.errors.is_empty() {
-            tracing::info!(group_id = %group.id, "sleep transition completed");
-            crate::notify::app_deactivated(&group.name, automatic);
-            (
-                true,
-                format!(
-                    "Группа «{}» {}",
-                    group.name,
-                    if automatic {
-                        "автоматически усыплена"
-                    } else {
-                        "усыплена"
-                    }
-                ),
-            )
-        } else {
-            tracing::error!(
-                group_id = %group.id,
-                errors = report.errors.len(),
-                "sleep transition completed with errors"
-            );
-            (
-                false,
-                report
-                    .errors
-                    .into_iter()
-                    .map(|error| error.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-        });
+        self.transitioning
+            .insert(group.id.clone(), TransitionKind::Sleep);
+        self.transitions.sleep(group, policy, automatic);
+        self.action_message = Some((true, format!("Усыпляем «{name}»…")));
     }
 
     fn migrate_legacy_frozen_processes(&mut self) {
@@ -441,24 +614,15 @@ impl TuneupApp {
         if targets.is_empty() {
             return;
         }
-        let mut changed = false;
         for (group_id, identities) in targets {
             tracing::warn!(
                 %group_id,
                 count = identities.len(),
                 "migrating legacy freeze PIDs to terminate"
             );
-            let (remaining, errors) = self.deactivator.finish_legacy_freeze(identities);
-            if let Some(state) = self.state.managed_groups.get_mut(&group_id) {
-                state.processes = remaining;
-                changed = true;
-            }
-            for error in errors {
-                tracing::error!(%group_id, error = %error, "legacy freeze terminate failed");
-            }
-        }
-        if changed {
-            self.persist_state();
+            self.transitioning
+                .insert(group_id.clone(), TransitionKind::Terminate);
+            self.transitions.finish_legacy_freeze(group_id, identities);
         }
     }
 
@@ -482,6 +646,9 @@ impl TuneupApp {
             })
             .collect::<Vec<_>>();
         for (group_id, name, policy, install_root) in sleeping {
+            if self.transitioning.contains_key(&group_id) {
+                continue;
+            }
             let group = self
                 .groups
                 .iter()
@@ -508,21 +675,21 @@ impl TuneupApp {
                 count = expanded.len(),
                 "re-enforcing persisted sleep on startup"
             );
-            match self.deactivator.terminate_only(&expanded) {
-                Ok(()) => {
-                    crate::notify::app_deactivated(&name, true);
-                }
-                Err((_remaining, errors)) => {
-                    for error in errors {
-                        tracing::error!(%group_id, error = %error, "re-enforce sleep failed");
-                    }
-                }
-            }
+            self.transitioning
+                .insert(group_id.clone(), TransitionKind::Terminate);
+            self.transitions.terminate_only(group_id, name, expanded);
         }
         self.scanner.request_refresh();
     }
 
     fn wake_group(&mut self, group_id: &str, automatic: bool, launch: bool) {
+        self.wake_group_inner(group_id, automatic, launch, false);
+    }
+
+    fn wake_group_inner(&mut self, group_id: &str, automatic: bool, launch: bool, orphan: bool) {
+        if self.transitioning.contains_key(group_id) {
+            return;
+        }
         let Some(state) = self.state.managed_groups.remove(group_id) else {
             return;
         };
@@ -532,58 +699,89 @@ impl TuneupApp {
             group_name = %name,
             automatic,
             launch,
+            orphan,
             "wake transition started"
         );
-        let report = self.deactivator.wake(state, launch);
-        let name_for_notify = name.clone();
-        if automatic {
-            // Auto wake keeps AutoSleepWake armed: closing the app will sleep again.
-            self.state
-                .managed_groups
-                .insert(group_id.to_owned(), report.state);
-        } else if report.state.lifecycle == GroupStatus::Sleeping
-            || !report.state.processes.is_empty()
-            || !report.state.platform.is_empty()
-        {
-            // Incomplete manual wake — keep a Manual entry so the user can retry.
-            let mut state = report.state;
-            state.policy = GroupPolicy::Manual;
-            self.state.managed_groups.insert(group_id.to_owned(), state);
-        }
-        // Successful manual wake: do not re-insert. Leaving managed_groups means
-        // closing the app will not put it back to sleep.
+        // Persist the removal immediately: if TuneUp dies mid-wake the group
+        // must not stay flagged Sleeping (the next start would re-kill a
+        // freshly woken application).
         self.persist_state();
-        self.scanner.request_refresh();
-        crate::notify::app_activated(&name_for_notify, automatic);
-        self.action_message = Some(if report.errors.is_empty() {
-            tracing::info!(group_id, automatic, "wake transition completed");
-            (
-                true,
-                format!(
-                    "Группа «{name}» {}",
-                    if automatic {
-                        "автоматически пробуждена"
-                    } else {
-                        "пробуждена и снята с режима сна"
-                    }
-                ),
+        self.transitioning
+            .insert(group_id.to_owned(), TransitionKind::Wake);
+        self.transitions.wake(state, launch, automatic, orphan);
+        self.action_message = Some((true, format!("Будим «{name}»…")));
+    }
+
+    /// Restores autostart for sleeping groups that no longer match any known
+    /// install.
+    ///
+    /// An app update that changes the install path (JetBrains-style versioned
+    /// folders) or a manual removal leaves the group id orphaned: the entry
+    /// stays in `managed_groups` forever with autostart disabled and no UI to
+    /// wake it. Healing restores the disabled entries and drops the group.
+    fn heal_orphaned_sleeping_groups(&mut self) {
+        let orphaned = self
+            .state
+            .managed_groups
+            .iter()
+            .filter(|(id, state)| {
+                state.lifecycle == GroupStatus::Sleeping
+                    && !self.groups.iter().any(|group| group.id == **id)
+            })
+            .filter(
+                |(id, state)| match state.match_rules.install_root.as_deref() {
+                    None => true,
+                    // Root disappeared (uninstalled / updated to a new path), or
+                    // the id was written by an older path-normalization scheme.
+                    Some(root) => !root.exists() || **id != stable_id(&normalize_path(root)),
+                },
             )
-        } else {
-            tracing::error!(
-                group_id,
-                errors = report.errors.len(),
-                "wake transition completed with errors"
+            .map(|(id, state)| (id.clone(), state.clone()))
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for (group_id, state) in orphaned {
+            changed = true;
+            if state.platform.is_empty() {
+                tracing::warn!(
+                    %group_id,
+                    "dropping orphaned sleeping group without platform backup"
+                );
+                self.state.managed_groups.remove(&group_id);
+                continue;
+            }
+            tracing::warn!(
+                %group_id,
+                "healing orphaned sleeping group: restoring disabled autostart"
             );
-            (
-                false,
-                report
-                    .errors
-                    .into_iter()
-                    .map(|error| error.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-        });
+            self.transitioning
+                .insert(group_id.clone(), TransitionKind::Wake);
+            self.transitions.wake(state, false, false, true);
+        }
+        if changed {
+            self.persist_state();
+        }
+    }
+
+    fn handle_reset_wake(&mut self, group_id: String, name: String, report: ManagedActionReport) {
+        let Some(progress) = &mut self.reset_pending else {
+            return;
+        };
+        tracing::info!(%group_id, "reset-all woke group");
+        if report.errors.is_empty() {
+            crate::notify::app_activated(&name, false);
+        } else {
+            progress
+                .errors
+                .extend(report.errors.iter().map(ToString::to_string));
+        }
+        progress.remaining -= 1;
+        if progress.remaining == 0 {
+            let progress = self
+                .reset_pending
+                .take()
+                .expect("reset progress checked above");
+            self.finish_reset(progress.errors);
+        }
     }
 
     fn ignore_group(&mut self, group: &ProcessGroup) {
@@ -665,30 +863,46 @@ impl TuneupApp {
         }
     }
 
-    /// Wakes every sleeping group, clears managed state, and turns off TuneUp autostart.
+    /// Wakes every sleeping group, clears managed state, and turns off TuneUp
+    /// autostart. Wake transitions run on the worker; completion is tracked in
+    /// [`ResetProgress`] and finalized by [`Self::finish_reset`].
     fn reset_all(&mut self) {
+        if self.reset_pending.is_some() {
+            return;
+        }
         tracing::info!("settings reset-all requested");
         let previous = std::mem::take(&mut self.state.managed_groups);
-        let mut errors = Vec::new();
-        let mut failed = std::collections::HashMap::new();
         for (group_id, state) in previous {
             if state.lifecycle != GroupStatus::Sleeping {
                 continue;
             }
-            let name = state.name.clone();
-            let report = self.deactivator.wake(state, false);
-            if report.errors.is_empty() {
-                tracing::info!(%group_id, "reset-all woke group");
-                crate::notify::app_activated(&name, false);
-            } else {
-                errors.extend(report.errors.iter().map(ToString::to_string));
-                failed.insert(group_id, report.state);
-            }
+            tracing::info!(%group_id, "reset-all waking group");
+            self.transitioning
+                .insert(group_id.clone(), TransitionKind::Wake);
+            self.transitions.wake(state, false, false, false);
         }
-        self.state.managed_groups = failed;
-        self.policy.replace_managed(self.state.managed_groups.clone());
-        self.policy_primed = false;
+        // Wake transitions already in flight when the reset started are
+        // absorbed by the same accounting.
+        let total_wakes = self
+            .transitioning
+            .values()
+            .filter(|kind| **kind == TransitionKind::Wake)
+            .count();
+        if total_wakes == 0 {
+            self.finish_reset(Vec::new());
+        } else {
+            self.reset_pending = Some(ResetProgress {
+                remaining: total_wakes,
+                errors: Vec::new(),
+            });
+            self.settings_view.message = Some((true, "Пробуждаем спящие приложения…".into()));
+        }
+    }
 
+    /// Finalizes a reset after all wake transitions reported back.
+    fn finish_reset(&mut self, mut errors: Vec<String>) {
+        // Anything that completed a transition during the reset is dropped too.
+        self.state.managed_groups.clear();
         if self.state.start_at_login {
             if let Err(error) = self.self_autostart.set_enabled(false) {
                 errors.push(error.to_string());
@@ -710,8 +924,7 @@ impl TuneupApp {
                 },
             ));
         } else {
-            self.settings_view.message =
-                Some((true, "Все настройки и усыпления сброшены".into()));
+            self.settings_view.message = Some((true, "Все настройки и усыпления сброшены".into()));
             self.action_message = Some((true, "Сброс выполнен".into()));
         }
     }
@@ -980,7 +1193,9 @@ impl TuneupApp {
                     .show(ui, |ui| {
                         for group in &rows {
                             let expanded = self.expanded_groups.contains(&group.id);
-                            let sleep_enabled = can_sleep(group) && can_control && state_ready;
+                            let busy = self.transitioning.contains_key(&group.id);
+                            let sleep_enabled =
+                                can_sleep(group) && can_control && state_ready && !busy;
 
                             egui::Frame::new()
                                 .fill(theme.panel_raised)
@@ -1063,10 +1278,13 @@ impl TuneupApp {
                                                 GroupStatus::Sleeping => {
                                                     if ui
                                                         .add_enabled(
-                                                            can_control,
+                                                            can_control && !busy,
                                                             egui::Button::new("Разбудить").fill(
                                                                 Color32::from_rgb(48, 105, 76),
                                                             ),
+                                                        )
+                                                        .on_disabled_hover_text(
+                                                            "Переход выполняется…",
                                                         )
                                                         .clicked()
                                                     {
@@ -1326,6 +1544,7 @@ impl eframe::App for TuneupApp {
         self.window.enforce_hidden_if_needed(context, frame);
         self.process_scanner_events();
         self.process_maintenance_events();
+        self.process_transition_events();
         self.process_close_request(context, frame);
     }
 
@@ -1475,12 +1694,17 @@ fn running_color(group: &ProcessGroup) -> Color32 {
 }
 
 fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
     const MIB: f64 = 1_048_576.0;
     const GIB: f64 = 1_073_741_824.0;
     if bytes as f64 >= GIB {
         format!("{:.1} ГБ", bytes as f64 / GIB)
-    } else {
+    } else if bytes as f64 >= MIB {
         format!("{:.0} МБ", bytes as f64 / MIB)
+    } else if bytes as f64 >= KIB {
+        format!("{:.0} КБ", bytes as f64 / KIB)
+    } else {
+        format!("{bytes} Б")
     }
 }
 
@@ -1534,6 +1758,8 @@ mod tests {
     fn formats_memory() {
         assert_eq!(format_bytes(512 * 1_048_576), "512 МБ");
         assert_eq!(format_bytes(2 * 1_073_741_824), "2.0 ГБ");
+        assert_eq!(format_bytes(300 * 1024), "300 КБ");
+        assert_eq!(format_bytes(42), "42 Б");
     }
 
     #[test]

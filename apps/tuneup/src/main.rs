@@ -9,6 +9,7 @@ mod platform_runtime;
 mod scanner;
 mod single_instance;
 mod theme;
+mod transition_worker;
 mod tray;
 mod views;
 mod window;

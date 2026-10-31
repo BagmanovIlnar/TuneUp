@@ -6,6 +6,7 @@ use tuneup_core::{
 };
 use tuneup_platform::{AppLauncher, PlatformMutator, ProcessControl};
 
+#[derive(Debug)]
 pub struct ManagedActionReport {
     pub state: ManagedGroupState,
     pub errors: Vec<TuneupError>,
@@ -77,12 +78,11 @@ impl DeactivationManager {
             errors.extend(kill_errors);
         }
 
-        if launch {
-            if let Some(root) = state.match_rules.install_root.clone() {
-                if let Err(error) = self.app_launcher.launch(&root, &state.name) {
-                    errors.push(error);
-                }
-            }
+        if launch
+            && let Some(root) = state.match_rules.install_root.clone()
+            && let Err(error) = self.app_launcher.launch(&root, &state.name)
+        {
+            errors.push(error);
         }
 
         state.lifecycle = if state.processes.is_empty() && state.platform.is_empty() {
