@@ -1,9 +1,10 @@
 //! Registers TuneUp itself to start at user login on macOS.
 
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use tuneup_core::{TuneupError, error::PlatformError};
@@ -109,6 +110,7 @@ fn xml_escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+#[cfg(target_os = "macos")]
 fn launch_domain() -> String {
     #[cfg(target_os = "macos")]
     {

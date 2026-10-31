@@ -14,7 +14,7 @@ env:
 
 jobs:
   check:
-    name: fmt / test / clippy
+    name: fmt / test / clippy (linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,6 +28,52 @@ jobs:
             libxkbcommon-dev libxcb1-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libwayland-dev libegl1-mesa-dev libgl1-mesa-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # The Windows-specific modules (`#[cfg(windows)]` in tuneup-windows: named
+  # pipes, registry, tasks, services — most of the unsafe code) never compile
+  # on a Linux host in the regular job above. Type-check them here so a broken
+  # Windows build is caught in CI instead of at release time.
+  check-windows:
+    name: cross-check windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - name: cargo check (windows target)
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
+
+      - name: cargo clippy (windows target)
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
+  # Same story for the macOS crate (objc2, launchd, .app bundles): compile and
+  # lint it on a real macOS host.
+  check-macos:
+    name: fmt / test / clippy (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master

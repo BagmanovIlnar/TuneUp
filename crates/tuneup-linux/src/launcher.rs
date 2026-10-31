@@ -1,6 +1,6 @@
 //! Launches installed applications from their install root (Sleep Mode wake).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tuneup_core::{TuneupError, error::PlatformError};
 
@@ -32,13 +32,8 @@ impl LinuxAppLauncher {
                 }
             }
             if let Some(exe) = find_launch_executable(install_root, display_name) {
-                return try_command(&exe, &[]).map_err(|detail| {
-                    PlatformError::Mutation {
-                        path: exe,
-                        detail,
-                    }
-                    .into()
-                });
+                return try_command(&exe, &[])
+                    .map_err(|detail| PlatformError::Mutation { path: exe, detail }.into());
             }
             Err(PlatformError::Mutation {
                 path: install_root.to_path_buf(),
@@ -49,10 +44,10 @@ impl LinuxAppLauncher {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (install_root, display_name);
-            Err(PlatformError::Unsupported(
-                "запуск приложений доступен только в Linux".to_owned(),
+            Err(
+                PlatformError::Unsupported("запуск приложений доступен только в Linux".to_owned())
+                    .into(),
             )
-            .into())
         }
     }
 }
@@ -84,7 +79,8 @@ fn try_command(program: &Path, args: &[&std::ffi::OsStr]) -> Result<(), String> 
 }
 
 #[cfg(target_os = "linux")]
-fn application_data_dirs() -> Vec<PathBuf> {
+#[cfg(target_os = "linux")]
+fn application_data_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         dirs.push(home.join(".local/share/applications"));
@@ -370,10 +366,7 @@ mod tests {
 
     #[test]
     fn preferred_names_strip_jetbrains_version() {
-        let names = preferred_binary_names(
-            Path::new("/opt/PhpStorm-262.10315.130"),
-            "PhpStorm",
-        );
+        let names = preferred_binary_names(Path::new("/opt/PhpStorm-262.10315.130"), "PhpStorm");
         assert!(names.iter().any(|name| name == "phpstorm"));
         assert!(names.iter().any(|name| name == "phpstorm.sh"));
     }

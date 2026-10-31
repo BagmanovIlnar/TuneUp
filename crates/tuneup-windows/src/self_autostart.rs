@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use tuneup_core::{TuneupError, error::PlatformError};
 use tuneup_platform::SelfAutostartProvider;
 
+#[cfg(windows)]
 const VALUE_NAME: &str = "TuneUp";
+#[cfg(windows)]
 const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 /// HKCU Run-key provider for TuneUp login autostart.
@@ -93,7 +95,7 @@ mod imp {
         }
     }
 
-    fn quoted_command(executable: &Path) -> String {
+    pub fn quoted_command(executable: &Path) -> String {
         let path = executable.to_string_lossy();
         if path.contains(' ') {
             format!("\"{path}\"")

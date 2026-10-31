@@ -587,6 +587,7 @@ fn run_brew_cask_uninstall(name: &str) -> Result<(), PlatformError> {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }

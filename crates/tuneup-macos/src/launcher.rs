@@ -1,6 +1,6 @@
 //! Launches installed applications from their install root (Sleep Mode wake).
 
-use std::{io, path::Path, process::Command};
+use std::path::Path;
 
 use tuneup_core::{TuneupError, error::PlatformError};
 
@@ -17,6 +17,8 @@ impl MacOsAppLauncher {
     /// MacOsAppLauncher.launch(Path::new("/Applications/RustRover.app"), "RustRover")?;
     /// ```
     pub fn launch(&self, install_root: &Path, display_name: &str) -> Result<(), TuneupError> {
+        #[cfg(target_os = "macos")]
+        use std::{io, process::Command};
         #[cfg(target_os = "macos")]
         {
             let _ = display_name;
@@ -46,10 +48,10 @@ impl MacOsAppLauncher {
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (install_root, display_name);
-            Err(PlatformError::Unsupported(
-                "запуск приложений доступен только в macOS".to_owned(),
+            Err(
+                PlatformError::Unsupported("запуск приложений доступен только в macOS".to_owned())
+                    .into(),
             )
-            .into())
         }
     }
 }
