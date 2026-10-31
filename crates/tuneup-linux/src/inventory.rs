@@ -580,33 +580,31 @@ mod imp {
                 {
                     continue;
                 }
-                match fs::read(&path)
+                let Ok((_, desktop)) = fs::read(&path)
                     .map_err(|error| error.to_string())
                     .and_then(|bytes| parse_desktop(&bytes).map(|desktop| (bytes, desktop)))
-                {
-                    Ok((_, desktop)) => {
-                        let name = if desktop.name.is_empty() {
-                            path.file_stem()
-                                .and_then(|stem| stem.to_str())
-                                .unwrap_or("unknown")
-                                .to_owned()
-                        } else {
-                            desktop.name
-                        };
-                        snapshot.autostart.push(AutoStartEntry::XdgDesktop {
-                            location,
-                            desktop_path: path,
-                            name,
-                            hidden: desktop.hidden,
-                            target: ExecutableRef {
-                                resolved_path: desktop_exec_path(&desktop.exec),
-                                raw: desktop.exec,
-                            },
-                        });
-                    }
+                else {
                     // Broken desktop files are common; skip without flooding the UI.
-                    Err(_) => {}
-                }
+                    continue;
+                };
+                let name = if desktop.name.is_empty() {
+                    path.file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or("unknown")
+                        .to_owned()
+                } else {
+                    desktop.name
+                };
+                snapshot.autostart.push(AutoStartEntry::XdgDesktop {
+                    location,
+                    desktop_path: path,
+                    name,
+                    hidden: desktop.hidden,
+                    target: ExecutableRef {
+                        resolved_path: desktop_exec_path(&desktop.exec),
+                        raw: desktop.exec,
+                    },
+                });
             }
         }
     }

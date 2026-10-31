@@ -1,6 +1,8 @@
 //! Launches installed applications from their install root (Sleep Mode wake).
 
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
 use tuneup_core::{TuneupError, error::PlatformError};
 
@@ -26,10 +28,10 @@ impl LinuxAppLauncher {
     pub fn launch(&self, install_root: &Path, display_name: &str) -> Result<(), TuneupError> {
         #[cfg(target_os = "linux")]
         {
-            if let Some(desktop_id) = find_desktop_id_for_root(install_root) {
-                if try_command(Path::new("gtk-launch"), &[desktop_id.as_ref()]).is_ok() {
-                    return Ok(());
-                }
+            if let Some(desktop_id) = find_desktop_id_for_root(install_root)
+                && try_command(Path::new("gtk-launch"), &[desktop_id.as_ref()]).is_ok()
+            {
+                return Ok(());
             }
             if let Some(exe) = find_launch_executable(install_root, display_name) {
                 return try_command(&exe, &[])
@@ -79,8 +81,7 @@ fn try_command(program: &Path, args: &[&std::ffi::OsStr]) -> Result<(), String> 
 }
 
 #[cfg(target_os = "linux")]
-#[cfg(target_os = "linux")]
-fn application_data_dirs() -> Vec<std::path::PathBuf> {
+fn application_data_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         dirs.push(home.join(".local/share/applications"));
@@ -314,7 +315,7 @@ fn is_helper_binary(name: &str) -> bool {
         "ltedit.sh",
         "brokenplugins.db",
     ];
-    HELPERS.iter().any(|helper| name == *helper)
+    HELPERS.contains(&name)
         || name.ends_with(".vmoptions")
         || name.ends_with(".properties")
         || name.ends_with(".png")
